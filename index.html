@@ -163,6 +163,7 @@
     width: 42px; height: 42px; border-radius: 9px; object-fit: cover; flex: none;
     background: var(--soft);
   }
+  .maker { color: var(--muted); font-weight: 400; }
   .thumb.product { object-fit: contain; background: #fff; padding: 2px; box-sizing: border-box; }
   .row.checked .thumb { opacity: 0.5; }
   .more {
@@ -497,7 +498,7 @@
 
   <main id="list"><div class="loading">Loading…</div></main>
 
-  <script type="module" src="app.js?v=38"></script>
+  <script type="module" src="app.js?v=39"></script>
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));

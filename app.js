@@ -933,9 +933,12 @@ function searchScore(tokens, norm, words, typed) {
 
 function productSearch(data, query) {
   if (!searchIndex || searchIndex.data !== data) {
+    // The brand ("הר ברכה") is searched too: stores often leave it out of the product name.
+    const makers = data.makers || [];
     searchIndex = { data, rows: Object.entries(data.items || {}).map(([code, row]) => {
-      const norm = searchNorm(row[0]);
-      return { code, norm, tokens: norm.split(' ') };
+      const maker = typeof row[2] === 'number' ? makers[row[2]] || '' : '';
+      const norm = searchNorm(row[0] + (maker ? ' ' + maker : ''));
+      return { code, norm, tokens: norm.split(' '), maker };
     }) };
   }
   // Each word must appear in the name (an English word may match its Hebrew translation instead).
@@ -945,7 +948,7 @@ function productSearch(data, query) {
   const hits = searchIndex.rows.filter(r => words.every(alts => alts.some(a => r.norm.includes(a))));
   const stores = code => (data.items[code][1] || []).filter(v => v != null).length;
   return hits
-    .map(r => ({ code: r.code, name: data.items[r.code][0], stores: stores(r.code), score: searchScore(r.tokens, r.norm, words, typed) }))
+    .map(r => ({ code: r.code, name: data.items[r.code][0], maker: r.maker, stores: stores(r.code), score: searchScore(r.tokens, r.norm, words, typed) }))
     // Best match first; among equally good matches, the one sold in more of your stores, then the shorter name.
     .sort((a, b) => (b.score - a.score) || (b.stores - a.stores) || (a.name.length - b.name.length));
 }
@@ -1032,7 +1035,7 @@ function openProductSearch() {
       const sub = best ? `${best.deal ? 'Best deal' : 'Cheapest'}: ${esc(best.label)} ${money(best.each)}${best.deal ? ' each' : ''} · in ${h.stores} of ${data.stores.length} stores` : '';
       return `<button class="price-row result" data-code="${esc(h.code)}">
           <span class="prod-img" data-img="${esc(h.code)}">🛒</span>
-          <div class="main"><div class="store">${esc(h.name)}</div><div class="sub">${sub}</div></div>
+          <div class="main"><div class="store">${esc(h.name)}${h.maker && !searchNorm(h.name).includes(searchNorm(h.maker)) ? ` <span class="maker">· ${esc(h.maker)}</span>` : ''}</div><div class="sub">${sub}</div></div>
           <span class="chev-r">›</span>
         </button>`;
     }).join('')}</div>
