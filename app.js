@@ -887,7 +887,7 @@ const EN_HE = {
   milk: 'חלב', eggs: 'ביצים', egg: 'ביצים', bread: 'לחם', cheese: 'גבינה', cottage: 'קוטג', yogurt: 'יוגורט', yoghurt: 'יוגורט',
   butter: 'חמאה', cream: 'שמנת', coffee: 'קפה', tea: 'תה', sugar: 'סוכר', flour: 'קמח', salt: 'מלח', oil: 'שמן', olive: 'זית',
   rice: 'אורז', pasta: 'פסטה', tuna: 'טונה', hummus: 'חומוס', tahini: 'טחינה', chicken: 'עוף', beef: 'בקר', fish: 'דג', salmon: 'סלמון',
-  water: 'מים', juice: 'מיץ', soda: 'סודה', beer: 'בירה', wine: 'יין', chocolate: 'שוקולד', cookies: 'עוגיות', crackers: 'קרקר',
+  water: 'מים', juice: 'מיץ', soda: 'סודה', beer: 'בירה', wine: 'יין', chocolate: ['שוקולד', 'שוקו'], cookies: 'עוגיות', crackers: 'קרקר',
   cereal: 'דגני', cornflakes: 'קורנפלקס', honey: 'דבש', jam: 'ריבה', ketchup: 'קטשופ', mayonnaise: 'מיונז', mayo: 'מיונז', mustard: 'חרדל',
   tomatoes: 'עגבניות', tomato: 'עגבני', cucumbers: 'מלפפונים', cucumber: 'מלפפון', potatoes: 'תפוחי אדמה', onion: 'בצל', onions: 'בצל',
   apples: 'תפוחים', apple: 'תפוח', bananas: 'בננה', banana: 'בננה', lemon: 'לימון', garlic: 'שום', corn: 'תירס', beans: 'שעועית',
@@ -899,19 +899,55 @@ const EN_HE = {
 
 const searchNorm = t => String(t || '').toLowerCase().replace(/["'`״׳]/g, '').replace(/(\d)\s+%/g, '$1%').replace(/[^\p{L}\p{N}%.]+/gu, ' ').trim();
 
-let searchIndex = null; // [{ code, norm }] built once per price file
+let searchIndex = null; // [{ code, norm, tokens }] built once per price file
+
+// Words that make a product a "kind of" something else (chocolate milk, milk drink, milk pudding).
+// When you didn't type them, such products sink below the plain product.
+const FLAVOR_WORDS = ['שוקו', 'שוקולד', 'בטעם', 'משקה', 'אבקת', 'מעדן', 'פודינג', 'וניל', 'תות', 'בננה', 'קפה', 'קקאו',
+  'ממרח', 'חטיף', 'עוגיות', 'עוגה', 'דייסה', 'דייסת', 'גלידה', 'קרם', 'רוטב', 'סוכריות', 'מילקי', 'דנונה', 'יוגורט', 'מוס', 'קצפת', 'פרי',
+  'פירות', 'מתוק', 'מתוקה', 'מתובל', 'תוספת', 'שייק', 'פרוטאין', 'חלבון'];
+
+/** How well a product name matches what you typed: whole words near the start win, flavored versions lose. */
+function searchScore(tokens, norm, words, typed) {
+  let score = 0;
+  for (const alts of words) {
+    let best = 0;
+    tokens.forEach((t, i) => {
+      for (const a of alts) {
+        const bare = t.replace(/^[והבלמכש]/, '');
+        let m = t === a ? 3 : (bare === a && t.length > a.length) ? 2.5 : t.startsWith(a) ? 1.5 : t.includes(a) ? 0.5 : 0;
+        if (m >= 2.5) m += i === 0 ? 2 : i === 1 ? 1 : i === 2 ? 0.5 : 0; // "חלב ..." beats "משקה חלב ..."
+        if (m > best) best = m;
+      }
+    });
+    if (!best && alts.some(a => norm.includes(a))) best = 0.5; // a phrase like "תפוחי אדמה"
+    score += best;
+  }
+  const has = f => tokens.some(t => t === f || t.replace(/^[והבלמכש]/, '') === f || t.startsWith(f + '-'));
+  // Looking for a flavored product yourself ("שוקו", "וניל")? Then flavored names aren't pushed down.
+  if (!FLAVOR_WORDS.some(f => typed.split(' ').includes(f))) {
+    for (const f of FLAVOR_WORDS) if (has(f)) score -= 3;
+  }
+  return score;
+}
+
 function productSearch(data, query) {
   if (!searchIndex || searchIndex.data !== data) {
-    searchIndex = { data, rows: Object.entries(data.items || {}).map(([code, row]) => ({ code, norm: searchNorm(row[0]) })) };
+    searchIndex = { data, rows: Object.entries(data.items || {}).map(([code, row]) => {
+      const norm = searchNorm(row[0]);
+      return { code, norm, tokens: norm.split(' ') };
+    }) };
   }
   // Each word must appear in the name (an English word may match its Hebrew translation instead).
-  const words = searchNorm(query).split(' ').filter(Boolean).map(w => [w, ...(EN_HE[w] ? [searchNorm(EN_HE[w])] : [])]);
+  const words = searchNorm(query).split(' ').filter(Boolean).map(w => [w, ...[].concat(EN_HE[w] || []).map(searchNorm)]);
   if (!words.length) return [];
+  const typed = words.flat().join(' ');
   const hits = searchIndex.rows.filter(r => words.every(alts => alts.some(a => r.norm.includes(a))));
   const stores = code => (data.items[code][1] || []).filter(v => v != null).length;
   return hits
-    .map(r => ({ code: r.code, name: data.items[r.code][0], stores: stores(r.code), starts: words[0].some(a => r.norm.startsWith(a)) }))
-    .sort((a, b) => (b.stores - a.stores) || (b.starts - a.starts) || (a.name.length - b.name.length));
+    .map(r => ({ code: r.code, name: data.items[r.code][0], stores: stores(r.code), score: searchScore(r.tokens, r.norm, words, typed) }))
+    // Best match first; among equally good matches, the one sold in more of your stores, then the shorter name.
+    .sort((a, b) => (b.score - a.score) || (b.stores - a.stores) || (a.name.length - b.name.length));
 }
 
 // Product photos by barcode (a supermarket's studio photo, else Open Food Facts), loaded only for results on screen.
