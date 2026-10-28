@@ -1,5 +1,5 @@
 // Lets the app open without internet. The list itself is kept offline by Firebase.
-const CACHE = 'groceries-v37';
+const CACHE = 'groceries-v38';
 const SHELL = [
   './',
   './index.html',
@@ -30,15 +30,17 @@ self.addEventListener('fetch', event => {
   const url = new URL(req.url);
 
   // The app's own files: try the network first (to get updates), fall back to the saved copy.
+  // 'no-cache' asks the server every time, so a new version shows on the next open instead of
+  // up to 10 minutes later (GitHub Pages lets browsers reuse files for 10 minutes).
   if (url.origin === self.location.origin) {
     event.respondWith(
-      fetch(req)
+      fetch(req.mode === 'navigate' ? req.url : req, { cache: 'no-cache' })
         .then(res => {
           const copy = res.clone();
           caches.open(CACHE).then(cache => cache.put(req, copy));
           return res;
         })
-        .catch(() => caches.match(req).then(r => r || caches.match('./index.html')))
+        .catch(() => caches.match(req, { ignoreSearch: true }).then(r => r || caches.match('./index.html')))
     );
     return;
   }
