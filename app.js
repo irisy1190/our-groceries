@@ -1724,8 +1724,17 @@ function startDrag(row, pointerId, clientY, captureEl) {
     cat: c.dataset.cat, el: c, rect: pageRect(c),
     rows: [...c.querySelectorAll('.row')].map(r => ({ key: r.dataset.key, ...pageRect(r) }))
   }));
-  const heads = [...listEl.querySelectorAll('.cat-head')].filter(h => h.dataset.cat !== card.dataset.cat)
-    .map(h => ({ cat: h.dataset.cat, el: h, rect: pageRect(h) }));
+  // Each other category's title catches the finger from halfway to the one above to halfway to the one below,
+  // so moving over a column of empty categories always lands on exactly one of them (no dead gaps).
+  const sections = [...listEl.querySelectorAll('section.cat')];
+  const heads = sections.map((sec, i) => {
+    const h = sec.querySelector('.cat-head');
+    if (!h || h.dataset.cat === card.dataset.cat) return null;
+    const r = pageRect(sec);
+    const prev = sections[i - 1] ? pageRect(sections[i - 1]).bottom : r.top - 16;
+    const next = sections[i + 1] ? pageRect(sections[i + 1]).top : r.bottom + 40;
+    return { cat: h.dataset.cat, el: h, rect: pageRect(h), zone: { top: (prev + r.top) / 2, bottom: (r.bottom + next) / 2 } };
+  }).filter(Boolean);
   drag = {
     row, card, rows, rects, others, heads,
     home: pageRect(card),
@@ -1751,7 +1760,7 @@ function showDropLine(left, width, pageY) {
 }
 function clearCross() {
   if (drag?.cross) drag.cross.el.classList.remove('drop-target');
-  if (drag) drag.cross = null;
+  if (drag) { drag.cross = null; delete drag.row.dataset.dest; }
   dropLine?.remove();
   dropLine = null;
 }
@@ -1768,9 +1777,9 @@ function crossTarget(pageY) {
     return { cat: o.cat, index, el: o.el, line: [o.rect.left, o.rect.width, lineY] };
   }
   for (const h of heads) {
-    if (pageY >= h.rect.top - 4 && pageY <= h.rect.bottom + 4) {
+    if (pageY >= h.zone.top && pageY <= h.zone.bottom) {
       const o = others.find(x => x.cat === h.cat);
-      return { cat: h.cat, index: o ? o.rows.length : 0, el: h.el, line: null };
+      return { cat: h.cat, index: o ? o.rows.length : 0, el: h.el, line: null, below: h.rect.bottom };
     }
   }
   return null;
@@ -1786,9 +1795,18 @@ function moveDrag(clientY) {
   const cross = crossTarget(clientY + window.scrollY);
   if (cross) {
     // Over another category: close the gap at home and mark where it will land.
-    if (!drag.cross || drag.cross.el !== cross.el) { clearCross(); cross.el.classList.add('drop-target'); }
+    if (!drag.cross || drag.cross.el !== cross.el) {
+      clearCross();
+      cross.el.classList.add('drop-target');
+      // Say on the item itself where it's going.
+      drag.row.dataset.dest = '→ ' + catName(cross.cat);
+      if (navigator.vibrate) navigator.vibrate(8);
+    }
     drag.cross = cross;
     if (cross.line) showDropLine(...cross.line); else { dropLine?.remove(); dropLine = null; }
+    // Over a category's title (an empty or closed one): the item snaps just under that title,
+    // so your finger and the item don't hide which category you're on.
+    if (cross.below != null) drag.row.style.transform = `translateY(${cross.below + 6 - drag.rects[index].top}px)`;
     rows.forEach((r, i) => { if (i !== index) r.style.transform = ''; });
     drag.target = index;
     return;

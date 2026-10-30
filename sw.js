@@ -1,5 +1,5 @@
 // Lets the app open without internet. The list itself is kept offline by Firebase.
-const CACHE = 'groceries-v39';
+const CACHE = 'groceries-v40';
 const SHELL = [
   './',
   './index.html',

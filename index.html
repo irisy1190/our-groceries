@@ -184,7 +184,22 @@
   .card { overflow: visible; }
   .drop-line { position: absolute; height: 3px; border-radius: 2px; background: var(--accent); z-index: 20; pointer-events: none; }
   .card.drop-target { box-shadow: 0 0 0 2px var(--accent); border-radius: 14px; }
-  .cat-head.drop-target { background: color-mix(in srgb, var(--accent) 16%, transparent); border-radius: 12px; }
+  .cat-head.drop-target {
+    background: color-mix(in srgb, var(--accent) 18%, transparent); border-radius: 12px;
+    box-shadow: inset 0 0 0 2px var(--accent);
+  }
+  .cat-head.drop-target .cat-name, .cat-head.drop-target .badge { opacity: 1; }
+  .cat-head.drop-target .cat-add, .cat-head.drop-target .chev, .cat-head.drop-target .count { display: none; }
+  .cat-head.drop-target::after {
+    content: 'Drop here'; font-size: 13px; font-weight: 600; color: #fff; background: var(--accent);
+    padding: 4px 10px; border-radius: 10px; flex: none;
+  }
+  /* The item being dragged says where it will go. */
+  .row.dragging[data-dest]::after {
+    content: attr(data-dest); position: absolute; top: -11px; inset-inline-end: 44px; z-index: 4;
+    font-size: 12px; font-weight: 600; color: #fff; background: var(--accent);
+    padding: 3px 9px; border-radius: 9px; white-space: nowrap; pointer-events: none;
+  }
   .card .row:first-child { border-radius: 14px 14px 0 0; }
   .card .row:last-child { border-radius: 0 0 14px 14px; }
   .card .row:only-child { border-radius: 14px; }
@@ -498,7 +513,7 @@
 
   <main id="list"><div class="loading">Loading…</div></main>
 
-  <script type="module" src="app.js?v=39"></script>
+  <script type="module" src="app.js?v=40"></script>
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
