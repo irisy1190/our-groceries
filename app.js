@@ -853,7 +853,7 @@ function openPricesNotSetUp() {
   });
 }
 
-function openPriceSheet(code, { fromSearch = false } = {}) {
+function openPriceSheet(code, { fromSearch = false, onAdded = null } = {}) {
   let result;           // undefined = loading, null = not found
   let fallbackName = findKnownByBarcode(code)?.name || '';
   let photo = productImageCache.get(code) || null;
@@ -882,12 +882,15 @@ function openPriceSheet(code, { fromSearch = false } = {}) {
           <button class="action" id="pcOnline"><span class="ico">🔎</span>Search other stores online</button>
         </div>`;
       const asOpt = $('#pcAsOption', body);
-      if (asOpt) asOpt.onclick = () => chooseItemForOption(code, name);
+      if (asOpt) asOpt.onclick = () => { s.close(); chooseItemForOption(code, name, onAdded); };
       const add = $('#pcAdd', body);
       if (add && !onList) add.onclick = () => {
         const known = findKnownByBarcode(code);
         s.close();
-        chooseWhereToBuy(result, known?.category || state.newCategory, (note, cat) => addItem(name, cat, '', note, code));
+        chooseWhereToBuy(result, known?.category || state.newCategory, (note, cat) => {
+          addItem(name, cat, '', note, code);
+          onAdded?.(); // added from search: close the search too, back to the list
+        });
       };
       $('#pcOnline', body).onclick = () => openCompare({ name: name || code, barcode: code, category: state.newCategory });
     }
@@ -1033,7 +1036,7 @@ function openProductSearch({ onPick = null } = {}) {
           if (!row) return;
           inp.blur();
           if (onPick) { searchSheet.close(); onPick(row.dataset.code, data?.items?.[row.dataset.code]?.[0] || ''); return; }
-          openPriceSheet(row.dataset.code, { fromSearch: true });
+          openPriceSheet(row.dataset.code, { fromSearch: true, onAdded: () => searchSheet.close() });
         };
         setTimeout(() => inp.focus(), 50);
       }
@@ -1184,7 +1187,7 @@ function openOptionsSheet(item) {
 }
 
 /** From a product's price check: put it into an item's options (an item on the list, or a new one). */
-function chooseItemForOption(code, name) {
+function chooseItemForOption(code, name, onDone = null) {
   const items = state.items.filter(i => !i.isChecked);
   openSheet({
     title: 'Add as an option to…',
@@ -1198,6 +1201,7 @@ function chooseItemForOption(code, name) {
       body.onclick = e => {
         if (e.target.closest('[data-new]')) {
           sh.close();
+          onDone?.();
           return openEditor(null, '', state.newCategory, {
             options: [{ code, name }],
             hint: 'Give the item a general name (e.g. יוגורט חלבון), then add the other products you\'re happy with.'
@@ -1207,6 +1211,7 @@ function chooseItemForOption(code, name) {
         const it = id && state.items.find(i => i.id === id);
         if (!it) return;
         sh.close();
+        onDone?.();
         const options = it.options?.length ? it.options : it.barcode ? [{ code: it.barcode, name: it.name }] : [];
         if (!options.some(o => o.code === code)) {
           updateItem({ ...it, options: cleanOptions([...options, { code, name }]) });
