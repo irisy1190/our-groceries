@@ -105,6 +105,8 @@ const state = {
   knownLoaded: false,
   history: [],
   undoStack: [],     // every change you made this session, newest last
+  storeFilter: null, // '' = All, a store's label, or '__none' (not planned); null = not read yet
+  showHiddenInFilter: false,
   newCategory: FALLBACK,
   focused: false,
   collapsed: loadCollapsed(),
@@ -1752,6 +1754,10 @@ function renderAll() {
 function renderList() {
   if (!state.ready || drag) return;
   if (document.activeElement?.matches?.('.inline-name')) return; // redrawn when the rename finishes
+  if (state.storeFilter === null) state.storeFilter = loadStoreFilter();
+  renderStoreChips();
+  if (state.storeFilter && pricesData && (state.storeFilter === NOT_PLANNED || storeLabels().includes(state.storeFilter))) return renderFilteredList();
+  document.body.classList.remove('filtering');
   const secs = sections();
   const hint = state.items.length ? '' : `<div class="empty small"><h3>Your list is empty</h3>Tap + next to a category to add an item.</div>`;
   const html = hint + secs.map(s => {
@@ -1762,7 +1768,7 @@ function renderList() {
     const count = empty ? '' : left === 0 ? `<span class="count done">✓ Done</span>` : `<span class="count">${left} left</span>`;
     const addRow = adding ? addRowHTML(s.category) : '';
     const rows = collapsed || (empty && !adding) ? ''
-      : `<div class="card" data-cat="${esc(s.category)}">${s.items.map(rowHTML).join('')}${addRow}</div>`;
+      : `<div class="card" data-cat="${esc(s.category)}">${s.items.map(i => rowHTML(i)).join('')}${addRow}</div>`;
     return `<section class="cat ${collapsed ? 'collapsed' : ''} ${empty ? 'empty-cat' : ''}" data-cat="${esc(s.category)}">
       <button class="cat-head" data-cat="${esc(s.category)}">
         ${badge(s.category)}<span class="cat-name">${esc(catName(s.category))}</span>${count}<span class="cat-add" role="button" aria-label="Add an item to ${esc(catName(s.category))}">+</span><span class="chev">▼</span>
@@ -1834,7 +1840,7 @@ function addRowHTML(category) {
     <div class="chips add-sugg"></div>`;
 }
 
-function rowHTML(i) {
+function rowHTML(i, priceHTML = '') {
   const star = isFavorite(i.name) ? `<span class="star">★</span>` : '';
   const qty = i.quantity ? `<span class="qty">${esc(i.quantity)}</span>` : '';
   const note = i.note ? `<div class="note">${esc(i.note)}</div>` : '';
@@ -1854,11 +1860,138 @@ function rowHTML(i) {
   return `<div class="row ${i.isChecked ? 'checked' : ''} ${opts.length ? 'has-opts' : ''}" data-id="${esc(i.id)}" data-key="${esc(keyFor(i.name))}">
     <span class="check">${i.isChecked ? '✓' : ''}</span>
     <div class="txt"><div class="name"><span class="name-text">${esc(i.name)}</span>${star}${qty}</div>${optLine}${note}</div>
-    ${thumb}
+    ${thumb}${priceHTML}
     <button class="more" aria-label="More options">⋯</button>
     <span class="handle" aria-label="Drag to reorder">≡</span>
   </div>`;
 }
+
+
+// ---------------------------------------------------------------------------
+// Filter the list by store: what to buy there, with that store's prices
+// ---------------------------------------------------------------------------
+
+const NOT_PLANNED = '__none';
+const filterKey = () => `storeFilter:${listRef?.id || ''}`;
+function loadStoreFilter() { try { return localStorage.getItem(filterKey()) || ''; } catch { return ''; } }
+function saveStoreFilter(v) { try { v ? localStorage.setItem(filterKey(), v) : localStorage.removeItem(filterKey()); } catch {} }
+
+const storeLabels = () => (pricesData?.stores || []).map(s => s.label);
+
+/** The store you planned to buy it at: from "Where will you buy it?" (the note), or for options the best deal among them. */
+function plannedStore(item) {
+  const labels = storeLabels();
+  for (const line of (item.note || '').split('\n')) {
+    const l = labels.find(x => line.startsWith(x + ' · '));
+    if (l) return l;
+  }
+  if (item.options?.length) {
+    const best = item.options.map(o => bestPriceFor(o.code)).filter(Boolean).sort((a, b) => a.each - b.each)[0];
+    if (best) return best.store;
+  }
+  return '';
+}
+
+/** Price per item at one store (best deal there counts), and the cheapest across your stores. */
+function priceAt(item, label) {
+  const codes = item.options?.length ? item.options.map(o => o.code) : item.barcode ? [item.barcode] : [];
+  let here = null, anywhere = null;
+  for (const code of codes) {
+    const r = resultFromData(pricesData, code);
+    if (!r) continue;
+    for (const s of withBestPrices(r)) {
+      if (s.each == null) continue;
+      if (s.label === label && (!here || s.each < here.each)) here = { each: s.each, deal: s.deal, price: s.price };
+      if (!anywhere || s.each < anywhere.each) anywhere = { each: s.each, store: s.label };
+    }
+  }
+  return { here, anywhere };
+}
+
+/** "2", "2 packs", "x3" → 2 / 3; anything else counts as one. */
+const qtyCount = q => { const m = /^\s*[x×]?\s*(\d{1,2})(?!\s*(?:ק"ג|קג|kg|g|ג|גרם|ml|מ"ל|l|ל|ליטר)\b)/i.exec(q || ''); return m ? Math.max(1, +m[1]) : 1; };
+
+function renderStoreChips() {
+  const box = $('#storeChips');
+  if (!box) return;
+  if (!pricesUrl()) { box.hidden = true; return; }
+  if (!pricesData) {
+    box.hidden = true;
+    if (!optionPricesRequested) { optionPricesRequested = true; loadPrices().then(d => d && renderList()); }
+    return;
+  }
+  const open = state.items.filter(i => !i.isChecked);
+  const counts = new Map();
+  for (const i of open) { const s = plannedStore(i) || NOT_PLANNED; counts.set(s, (counts.get(s) || 0) + 1); }
+  const f = state.storeFilter;
+  const chip = (value, label, n) => `<button class="store-chip ${f === value ? 'on' : ''}" data-filter="${esc(value)}">${esc(label)}${n ? ` <i>${n}</i>` : ''}</button>`;
+  box.innerHTML = chip('', 'All', 0) + storeLabels().map(l => chip(l, l, counts.get(l) || 0)).join('') + chip(NOT_PLANNED, 'Not planned', counts.get(NOT_PLANNED) || 0);
+  box.hidden = false;
+}
+
+function renderFilteredList() {
+  const f = state.storeFilter;
+  const items = sections().flatMap(s => s.items); // category order, bought last within each
+  const planned = [], also = [], none = [], hidden = [];
+  for (const i of items) {
+    const p = plannedStore(i);
+    if (f === NOT_PLANNED) { (p ? hidden : none).push({ i }); continue; }
+    const { here, anywhere } = priceAt(i, f);
+    if (p === f) planned.push({ i, here });
+    else if (!p) none.push({ i, here });
+    else if (here) also.push({ i, here, anywhere, p });
+    else hidden.push({ i });
+  }
+  const priceBox = (here, ref) => {
+    if (!here) return '';
+    let small = '';
+    if (here.deal) small = `<small class="down">on sale</small>`;
+    if (ref && ref.each < here.each - 0.005) small = `<small class="up">+${money(here.each - ref.each)}${here.each !== here.price ? '' : ''}</small>`;
+    return `<div class="f-price">${money(here.each)}${small}</div>`;
+  };
+  const card = list => `<div class="card f-card">${list.map(x => rowHTML(x.i, x.price)).join('')}</div>`;
+  let html = '';
+  if (f === NOT_PLANNED) {
+    html += none.length
+      ? `<div class="f-sec"><span>No store chosen yet</span><span>${none.filter(x => !x.i.isChecked).length}</span></div>${card(none)}
+         <div class="footnote">Items added without choosing where to buy (typed, or "No store note").</div>`
+      : `<div class="f-empty">Every item has a store. 🎉</div>`;
+  } else {
+    planned.forEach(x => { x.price = priceBox(x.here); });
+    also.forEach(x => { x.price = priceBox(x.here, x.anywhere); });
+    none.forEach(x => { x.price = priceBox(x.here); });
+    if (planned.length) html += `<div class="f-sec"><span>Planned for ${esc(f)}</span><span>${planned.filter(x => !x.i.isChecked).length}</span></div>${card(planned)}`;
+    if (also.length) html += `<div class="f-sec"><span>Also sold at ${esc(f)}</span><span>${also.filter(x => !x.i.isChecked).length}</span></div>${card(also)}`;
+    if (none.length) html += `<div class="f-sec"><span>No store yet</span><span>${none.filter(x => !x.i.isChecked).length}</span></div>${card(none)}`;
+    if (!planned.length && !also.length && !none.length) html += `<div class="f-empty">Nothing to buy at ${esc(f)}.</div>`;
+  }
+  if (hidden.length) {
+    const what = f === NOT_PLANNED ? 'with a store chosen' : `not sold at ${esc(f)} (or planned elsewhere)`;
+    html += `<button class="f-hidden"><span>${hidden.length} item${hidden.length === 1 ? '' : 's'} ${what}</span><u>${state.showHiddenInFilter ? 'Hide' : 'Show'}</u></button>`;
+    if (state.showHiddenInFilter) html += card(hidden);
+  }
+  // Estimated total for what you planned here (prices × quantity when it's a number).
+  if (f !== NOT_PLANNED) {
+    const open = planned.filter(x => !x.i.isChecked && x.here);
+    const total = open.reduce((sum, x) => sum + x.here.each * qtyCount(x.i.quantity), 0);
+    if (open.length) html += `<div class="f-total"><span>At ${esc(f)}: ${open.length} planned</span><b>≈ ${money(total)}</b></div>`;
+  }
+  document.body.classList.add('filtering');
+  listEl.innerHTML = html;
+  loadThumbs();
+}
+
+document.addEventListener('click', e => {
+  const b = e.target.closest('#storeChips [data-filter]');
+  if (!b) return;
+  state.storeFilter = b.dataset.filter === state.storeFilter ? '' : b.dataset.filter;
+  state.showHiddenInFilter = false;
+  saveStoreFilter(state.storeFilter);
+  if (!state.storeFilter) document.body.classList.remove('filtering');
+  if (navigator.vibrate) navigator.vibrate(8);
+  renderList();
+  window.scrollTo({ top: 0 });
+});
 
 // ---------- Drag to reorder: the ≡ handle, or a long press on the item ----------
 
@@ -1867,6 +2000,7 @@ let press = null; // a long press waiting to become a drag: { timer, x, y, row, 
 const LONG_PRESS_MS = 450;
 
 listEl.addEventListener('pointerdown', e => {
+  if (state.storeFilter) return; // the filtered view isn't in category order, so no dragging there
   const handle = e.target.closest('.handle');
   if (handle) {
     e.preventDefault();
@@ -2075,6 +2209,7 @@ listEl.addEventListener('pointercancel', () => { cancelPress(); endDrag(); });
 listEl.addEventListener('click', e => {
   if (e.target.closest('.handle') || justDragged) return; // the handle is only for dragging
   if (e.target.closest('.add-row, .add-sugg')) return;
+  if (e.target.closest('.f-hidden')) { state.showHiddenInFilter = !state.showHiddenInFilter; renderList(); return; }
   const plus = e.target.closest('.cat-add');
   if (plus) return startAdding(plus.closest('.cat-head').dataset.cat);
   const head = e.target.closest('.cat-head');
