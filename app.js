@@ -165,7 +165,10 @@ function parseItem(id, d) {
     // The product's own photo (from a supermarket site) for scanned/searched products.
     // null = not looked up yet, '' = none (or you removed it).
     photoUrl: d.photoUrl ?? null,
-    barcode: d.barcode ?? ''
+    barcode: d.barcode ?? '',
+    // "Any of these": products you're happy with, favorite first. boughtOption = the barcode that was bought.
+    options: cleanOptions(d.options),
+    boughtOption: d.boughtOption ?? ''
   };
 }
 
@@ -180,11 +183,21 @@ function itemData(it) {
     checkedAt: it.checkedAt ? Timestamp.fromDate(it.checkedAt) : null,
     hasPhoto: !!it.hasPhoto,
     photoUrl: it.photoUrl ?? null,
-    barcode: it.barcode || ''
+    barcode: it.barcode || '',
+    options: cleanOptions(it.options),
+    boughtOption: it.boughtOption || ''
   };
 }
 
 const itemRef = id => doc(itemsCol, id);
+
+/** A product option: { code: barcode, name }. */
+function cleanOptions(list) {
+  if (!Array.isArray(list)) return [];
+  const seen = new Set();
+  return list.filter(o => o && o.code && !seen.has(String(o.code)) && seen.add(String(o.code)))
+    .slice(0, 12).map(o => ({ code: String(o.code), name: String(o.name || '') }));
+}
 
 // ---------------------------------------------------------------------------
 // Categories & sections
@@ -485,11 +498,12 @@ function forget(known) {
   updateDoc(knownRef, new FieldPath('items', known.id), deleteField());
 }
 
-function remember(name, category, used, barcode = '') {
+function remember(name, category, used, barcode = '', options = null) {
   const key = keyFor(name);
   if (!validKey(key)) return;
   const entry = { name, category };
   if (barcode) entry.barcode = barcode;
+  if (options) entry.options = cleanOptions(options);
   if (used) {
     entry.count = increment(1);
     entry.lastUsed = Timestamp.now();
@@ -559,18 +573,21 @@ const restore = h => addItem(h.name, h.category, h.quantity, h.note);
 // Item actions
 // ---------------------------------------------------------------------------
 
-function addItem(name, category, quantity = '', note = '', barcode = '') {
+function addItem(name, category, quantity = '', note = '', barcode = '', options = null) {
   name = trim(name);
   if (!name) return null;
-  // A product we scanned before keeps its barcode, however it gets added.
-  barcode = barcode || state.known[keyFor(name)]?.barcode || '';
+  // A product we scanned before keeps its barcode (and its options), however it gets added.
+  const known = state.known[keyFor(name)];
+  barcode = barcode || known?.barcode || '';
+  options = cleanOptions(options ?? known?.options);
   const item = {
     id: newId(), name, category,
     quantity: trim(quantity), note: trim(note),
-    isChecked: false, createdAt: new Date(), checkedAt: null, hasPhoto: false, barcode
+    isChecked: false, createdAt: new Date(), checkedAt: null, hasPhoto: false, barcode,
+    options, boughtOption: ''
   };
   setDoc(itemRef(item.id), itemData(item));
-  remember(name, category, true, barcode);
+  remember(name, category, true, barcode, options.length ? options : null);
   log('added', item);
   register({ type: 'added', item });
   if (state.collapsed.has(category)) { state.collapsed.delete(category); saveCollapsed(); }
@@ -579,7 +596,7 @@ function addItem(name, category, quantity = '', note = '', barcode = '') {
 
 function updateItem(item) {
   setDoc(itemRef(item.id), itemData(item));
-  remember(item.name, item.category, false, item.barcode);
+  remember(item.name, item.category, false, item.barcode, item.options || []);
   log('edited', item);
 }
 
@@ -861,8 +878,11 @@ function openPriceSheet(code, { fromSearch = false } = {}) {
       body.innerHTML = `${head}${main}
         <div class="form" style="margin-top:14px">
           ${name ? `<button class="action" id="pcAdd" ${onList ? 'disabled' : ''}><span class="ico">➕</span>${onList ? 'Already on the list' : 'Add to the list'}</button>` : ''}
+          ${name ? `<button class="action" id="pcAsOption"><span class="ico">🔀</span>Add as an option to an item…</button>` : ''}
           <button class="action" id="pcOnline"><span class="ico">🔎</span>Search other stores online</button>
         </div>`;
+      const asOpt = $('#pcAsOption', body);
+      if (asOpt) asOpt.onclick = () => chooseItemForOption(code, name);
       const add = $('#pcAdd', body);
       if (add && !onList) add.onclick = () => {
         const known = findKnownByBarcode(code);
@@ -989,17 +1009,17 @@ function pumpImages() {
 }
 
 /** 🔍 Search your stores' products by name, then see prices and add to the list – like scanning. */
-function openProductSearch() {
+function openProductSearch({ onPick = null } = {}) {
   if (!pricesUrl()) return openPricesNotSetUp();
   let query = '';
   let data = pricesData;
   let timer = null;
   let root = null; // the sheet's body
   const SHOW = 40;
-  openSheet({
-    title: 'Find a product',
+  const searchSheet = openSheet({
+    title: onPick ? 'Add an option' : 'Find a product',
     full: true,
-    left: { label: 'Close' },
+    left: { label: onPick ? 'Cancel' : 'Close' },
     render(body) {
       root = body;
       if (!body.querySelector('#psInput')) {
@@ -1010,7 +1030,10 @@ function openProductSearch() {
         inp.oninput = () => { clearTimeout(timer); timer = setTimeout(() => { query = inp.value; drawResults(); }, 180); };
         $('#psResults', body).onclick = e => {
           const row = e.target.closest('[data-code]');
-          if (row) { inp.blur(); openPriceSheet(row.dataset.code, { fromSearch: true }); }
+          if (!row) return;
+          inp.blur();
+          if (onPick) { searchSheet.close(); onPick(row.dataset.code, data?.items?.[row.dataset.code]?.[0] || ''); return; }
+          openPriceSheet(row.dataset.code, { fromSearch: true });
         };
         setTimeout(() => inp.focus(), 50);
       }
@@ -1036,7 +1059,7 @@ function openProductSearch() {
       return `<button class="price-row result" data-code="${esc(h.code)}">
           <span class="prod-img" data-img="${esc(h.code)}">🛒</span>
           <div class="main"><div class="store">${esc(h.name)}${h.maker && !searchNorm(h.name).includes(searchNorm(h.maker)) ? ` <span class="maker">· ${esc(h.maker)}</span>` : ''}</div><div class="sub">${sub}</div></div>
-          <span class="chev-r">›</span>
+          <span class="chev-r">${onPick ? '＋' : '›'}</span>
         </button>`;
     }).join('')}</div>
     <div class="footnote">${hits.length > SHOW ? `Showing ${SHOW} of ${hits.length} – add a word to narrow it down. ` : ''}Product photos from supermarket websites and Open Food Facts.</div>`;
@@ -1050,6 +1073,149 @@ function openProductSearch() {
     box.querySelectorAll('[data-img]').forEach(el => io.observe(el));
   }
   if (!data) loadPrices().then(d => { data = d; drawResults(); });
+}
+
+// ---------- "Any of these": an item with a few acceptable products, favorite first ----------
+
+/** The best price per item for one product today: { store, each, deal } or null. */
+function bestPriceFor(code) {
+  const r = resultFromData(pricesData, code);
+  if (!r) return null;
+  const best = withBestPrices(r).filter(s => s.each != null).sort((a, b) => a.each - b.each)[0];
+  return best ? { store: best.label, each: best.each, deal: best.deal } : null;
+}
+
+/** " · best: Fresh Market 4 for ₪20" – the cheapest way to buy any of the options (for the list line). */
+let optionPricesRequested = false;
+function optionsBestDeal(opts) {
+  if (!pricesData) {
+    if (!optionPricesRequested && pricesUrl()) { optionPricesRequested = true; loadPrices().then(d => d && renderList()); }
+    return '';
+  }
+  const best = opts.map(o => bestPriceFor(o.code)).filter(Boolean).sort((a, b) => a.each - b.each)[0];
+  if (!best) return '';
+  return ` · best: ${esc(best.store)} ${best.deal ? esc(best.deal.text) : money(best.each)}`;
+}
+
+/** Fills every [data-opt-img] placeholder under root with that product's photo (or 🛒). */
+function fillOptionPhotos(root) {
+  root.querySelectorAll('[data-opt-img]:not([data-filled])').forEach(el => {
+    el.dataset.filled = '1';
+    productImage(el.dataset.optImg).then(url => {
+      if (!el.isConnected) return;
+      el.innerHTML = url ? `<img src="${esc(url)}" alt="">` : '🛒';
+      if (!url) el.classList.add('no-img');
+    });
+  });
+}
+
+/** Tap an "any of these" item: the options in your order, with prices – tap Found it on the first one the store has. */
+function openOptionsSheet(item) {
+  let picking = false; // "None of them here" → which store?
+  const sheet = openSheet({
+    title: item.name,
+    full: true,
+    left: { label: 'Close' },
+    right: { label: 'Edit', action: sh => { sh.close(); openEditor(state.items.find(i => i.id === item.id) || item); } },
+    render(body, sh) {
+      const it = state.items.find(i => i.id === item.id) || item;
+      const opts = it.options || [];
+      const qty = it.quantity ? ` · quantity ${esc(it.quantity)}` : '';
+      const cards = opts.map((o, n) => {
+        const r = pricesData ? resultFromData(pricesData, o.code) : null;
+        const stores = r ? withBestPrices(r).filter(s => s.price != null || s.each != null) : [];
+        const bestEach = Math.min(...stores.map(s => s.each ?? Infinity));
+        const chips = !pricesData ? '<span class="pchip muted">Loading prices…</span>'
+          : !stores.length ? '<span class="pchip muted">Not in your stores\' prices today</span>'
+          : stores.sort((a, b) => (a.each ?? 1e9) - (b.each ?? 1e9)).map(s => {
+              const cls = s.deal ? 'deal' : s.each <= bestEach + 0.005 && stores.length > 1 ? 'best' : '';
+              return `<span class="pchip ${cls}">${esc(s.label)} ${s.deal ? esc(s.deal.text) : money(s.price)}</span>`;
+            }).join('');
+        const isBought = it.isChecked && it.boughtOption === o.code;
+        return `<div class="opt-card ${isBought ? 'bought' : ''}">
+          <span class="rank">${n + 1}</span>
+          <span class="opt-thumb card-img" data-opt-img="${esc(o.code)}"></span>
+          <div class="opt-info"><div class="opt-name">${esc(o.name || o.code)}</div><div class="pchips">${chips}</div></div>
+          ${it.isChecked ? (isBought ? '<div class="opt-found done">✓ Bought</div>' : '')
+            : `<button class="opt-found ${n === 0 ? 'first' : ''}" data-found="${esc(o.code)}">Found it</button>`}
+        </div>`;
+      }).join('');
+      const storeLabels = (pricesData?.stores || []).map(s => s.label);
+      const none = it.isChecked
+        ? `<button class="opt-none undo" id="optUntick">Not bought after all</button>`
+        : picking
+          ? `<div class="group-title">Which store didn't have them?</div>
+             <div class="cat-pick">${[...storeLabels, 'Another store'].map(l => `<button class="chip none-chip" data-store="${esc(l)}">${esc(l)}</button>`).join('')}</div>`
+          : `<button class="opt-none" id="optNone">None of them here</button>`;
+      body.innerHTML = `
+        <div class="hint">${it.isChecked ? 'Already bought' : `Buy the first one you find${qty}`}</div>
+        ${opts.length ? `<div class="opt-cards">${cards}</div>` : '<div class="empty" style="padding:24px">No options yet – tap Edit to add some.</div>'}
+        ${none}
+        <div class="footnote">Today's shelf prices and sales from your stores' price files.</div>`;
+      fillOptionPhotos(body);
+      body.querySelectorAll('[data-found]').forEach(b => b.onclick = () => {
+        const code = b.dataset.found;
+        // Found one: a "Not at …" note from an earlier trip no longer matters.
+        const note = (it.note || '').split('\n').filter(l => !/^(Not at .+ \(|None of them in the store \()/.test(l)).join('\n');
+        updateDoc(itemRef(it.id), { isChecked: true, checkedAt: Timestamp.now(), boughtOption: code, note });
+        const o = opts.find(x => x.code === code);
+        log('bought', { ...it, note: [it.note, o ? `(${o.name})` : ''].filter(Boolean).join(' ') });
+        register({ type: 'bought-option', item: it });
+        if (navigator.vibrate) navigator.vibrate(15);
+        sh.close();
+      });
+      const noneBtn = $('#optNone', body);
+      if (noneBtn) noneBtn.onclick = () => { picking = true; sh.refresh(); };
+      body.querySelectorAll('[data-store]').forEach(b => b.onclick = () => {
+        const day = new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+        const line = b.dataset.store === 'Another store' ? `None of them in the store (${day})` : `Not at ${b.dataset.store} (${day})`;
+        // Keep one such line: a newer one replaces the older.
+        const kept = (it.note || '').split('\n').filter(l => !/^(Not at .+ \(|None of them in the store \()/.test(l));
+        updateItem({ ...it, note: [...kept.filter(Boolean), line].join('\n') });
+        register({ type: 'noted', item: it });
+        sh.close();
+      });
+      const untick = $('#optUntick', body);
+      if (untick) untick.onclick = () => { toggleItem(it); sh.close(); };
+    }
+  });
+  sheet.live = true;
+  if (!pricesData) loadPrices().then(() => sheet.refresh());
+}
+
+/** From a product's price check: put it into an item's options (an item on the list, or a new one). */
+function chooseItemForOption(code, name) {
+  const items = state.items.filter(i => !i.isChecked);
+  openSheet({
+    title: 'Add as an option to…',
+    left: { label: 'Cancel' },
+    render(body, sh) {
+      body.innerHTML = `<div class="form">
+          <button class="action" data-new="1"><span class="ico">➕</span>A new item…</button>
+          ${items.map(i => `<button class="action" data-id="${esc(i.id)}" style="color:var(--text)">${badge(i.category)}<span class="name-text">${esc(i.name)}</span>${i.options?.length ? `<span class="muted" style="margin-left:auto;font-size:14px">${i.options.length} options</span>` : ''}</button>`).join('')}
+        </div>
+        <div class="footnote">The item will show this product among its options, so whoever shops can buy any of them.</div>`;
+      body.onclick = e => {
+        if (e.target.closest('[data-new]')) {
+          sh.close();
+          return openEditor(null, '', state.newCategory, {
+            options: [{ code, name }],
+            hint: 'Give the item a general name (e.g. יוגורט חלבון), then add the other products you\'re happy with.'
+          });
+        }
+        const id = e.target.closest('[data-id]')?.dataset.id;
+        const it = id && state.items.find(i => i.id === id);
+        if (!it) return;
+        sh.close();
+        const options = it.options?.length ? it.options : it.barcode ? [{ code: it.barcode, name: it.name }] : [];
+        if (!options.some(o => o.code === code)) {
+          updateItem({ ...it, options: cleanOptions([...options, { code, name }]) });
+          showNotice(`Added to ${it.name}'s options`);
+          setTimeout(hideNotice, 1800);
+        }
+      };
+    }
+  });
 }
 
 /** Same shape as priceLookup's result, built straight from the loaded price file. */
@@ -1371,7 +1537,7 @@ function openCompare(item) {
 
 function toggleItem(item) {
   const nowChecked = !item.isChecked;
-  updateDoc(itemRef(item.id), { isChecked: nowChecked, checkedAt: nowChecked ? Timestamp.now() : null });
+  updateDoc(itemRef(item.id), { isChecked: nowChecked, checkedAt: nowChecked ? Timestamp.now() : null, ...(nowChecked ? {} : { boughtOption: '' }) });
   log(nowChecked ? 'bought' : 'unchecked', item);
   register({ type: 'toggled', item });
 }
@@ -1413,6 +1579,8 @@ function actionMessage(a) {
     case 'deleted': return `Deleted ${a.item.name}`;
     case 'moved': return `Moved ${a.item.name} to ${catName(a.to)}`;
     case 'edited': return `Renamed to ${a.newName}`;
+    case 'bought-option': return `Bought ${a.item.name}`;
+    case 'noted': return `Note on ${a.item.name}`;
     case 'cleared': return `Cleared ${a.items.length} item${a.items.length === 1 ? '' : 's'}`;
   }
   return '';
@@ -1632,6 +1800,7 @@ function loadThumbs() {
     const url = await getPhoto(img.dataset.photo);
     if (url) img.src = url;
   });
+  fillOptionPhotos(listEl);
   attachProductPhotos();
 }
 
@@ -1664,11 +1833,22 @@ function rowHTML(i) {
   const star = isFavorite(i.name) ? `<span class="star">★</span>` : '';
   const qty = i.quantity ? `<span class="qty">${esc(i.quantity)}</span>` : '';
   const note = i.note ? `<div class="note">${esc(i.note)}</div>` : '';
-  const thumb = i.hasPhoto ? `<img class="thumb" data-photo="${esc(i.id)}" alt="Photo">`
+  const opts = i.options || [];
+  const bought = i.isChecked && i.boughtOption ? opts.find(o => o.code === i.boughtOption) : null;
+  let thumb = i.hasPhoto ? `<img class="thumb" data-photo="${esc(i.id)}" alt="Photo">`
     : i.photoUrl ? `<img class="thumb product" src="${esc(i.photoUrl)}" alt="Photo" loading="lazy">` : '';
-  return `<div class="row ${i.isChecked ? 'checked' : ''}" data-id="${esc(i.id)}" data-key="${esc(keyFor(i.name))}">
+  let optLine = '';
+  if (opts.length) {
+    // "Any of these": a small stack of the options' photos, and a line saying how many and the best deal.
+    const shown = bought ? [bought] : opts.slice(0, 3);
+    if (!i.hasPhoto) thumb = `<span class="opt-stack" aria-label="Options">${shown.map(o => `<span class="opt-thumb" data-opt-img="${esc(o.code)}"></span>`).join('')}</span>`;
+    optLine = bought
+      ? `<div class="note opt-line">Bought: <bdi>${esc(bought.name)}</bdi></div>`
+      : `<div class="note opt-line">Any of ${opts.length}${optionsBestDeal(opts)}</div>`;
+  }
+  return `<div class="row ${i.isChecked ? 'checked' : ''} ${opts.length ? 'has-opts' : ''}" data-id="${esc(i.id)}" data-key="${esc(keyFor(i.name))}">
     <span class="check">${i.isChecked ? '✓' : ''}</span>
-    <div class="txt"><div class="name"><span class="name-text">${esc(i.name)}</span>${star}${qty}</div>${note}</div>
+    <div class="txt"><div class="name"><span class="name-text">${esc(i.name)}</span>${star}${qty}</div>${optLine}${note}</div>
     ${thumb}
     <button class="more" aria-label="More options">⋯</button>
     <span class="handle" aria-label="Drag to reorder">≡</span>
@@ -1690,7 +1870,7 @@ listEl.addEventListener('pointerdown', e => {
   }
   // Long press anywhere on an item (not its ⋯ button or photo) picks it up.
   const row = e.target.closest('.row');
-  if (!row || e.target.closest('.more, .thumb, .inline-name') || e.button > 0) return;
+  if (!row || e.target.closest('.more, .thumb, .opt-stack, .inline-name') || e.button > 0) return;
   cancelPress();
   press = { x: e.clientX, y: e.clientY, row, pointerId: e.pointerId };
   press.timer = setTimeout(() => {
@@ -1911,7 +2091,9 @@ listEl.addEventListener('click', e => {
     if (src) return openViewer(src);
   }
   if (e.target.closest('.inline-name')) return;
+  if (item.options?.length && !item.isChecked && e.target.closest('.check, .txt, .opt-stack')) return openOptionsSheet(item);
   if (e.target.closest('.check')) return toggleItem(item);
+  if (item.options?.length && e.target.closest('.txt, .opt-stack')) return openOptionsSheet(item);
   if (e.target.closest('.txt')) return startRename(row, item);
 });
 
@@ -2199,7 +2381,8 @@ function openEditor(existing, defaultName = '', defaultCategory = FALLBACK, extr
     hint: extra.hint || '',
     photoURL: (!existing?.hasPhoto && existing?.photoUrl) || null,
     newPhoto: null,
-    photoRemoved: false
+    photoRemoved: false,
+    options: cleanOptions(existing?.options ?? extra.options ?? state.known[keyFor(defaultName)]?.options)
   };
 
   const sheet = openSheet({
@@ -2220,7 +2403,9 @@ function openEditor(existing, defaultName = '', defaultCategory = FALLBACK, extr
             barcode: draft.barcode,
             hasPhoto: !!draft.newPhoto || (existing.hasPhoto && !draft.photoRemoved),
             // Removing the product photo keeps it off; a new barcode looks up its photo again.
-            photoUrl: draft.productRemoved ? '' : draft.barcode !== existing.barcode ? null : existing.photoUrl
+            photoUrl: draft.productRemoved ? '' : draft.barcode !== existing.barcode ? null : existing.photoUrl,
+            options: draft.options,
+            boughtOption: draft.options.some(o => o.code === existing.boughtOption) ? existing.boughtOption : ''
           };
           updateItem(item);
           if (existing.barcode && !draft.barcode) {
@@ -2230,7 +2415,7 @@ function openEditor(existing, defaultName = '', defaultCategory = FALLBACK, extr
           if (draft.newPhoto) setPhoto(draft.newPhoto, item.id);
           else if (draft.photoRemoved && existing.hasPhoto) removePhoto(item.id);
         } else {
-          const item = addItem(draft.name, draft.category, draft.quantity, draft.note, draft.barcode);
+          const item = addItem(draft.name, draft.category, draft.quantity, draft.note, draft.barcode, draft.options);
           if (item && draft.newPhoto) setPhoto(draft.newPhoto, item.id);
         }
         s.close();
@@ -2255,6 +2440,21 @@ function openEditor(existing, defaultName = '', defaultCategory = FALLBACK, extr
         <div class="form">
           <textarea id="edNote" dir="auto" rows="3" placeholder="e.g. 3% fat, the one with the blue label">${esc(draft.note)}</textarea>
         </div>
+        <div class="group-title">Options – any of these</div>
+        <div class="form opt-edit">
+          ${draft.options.map((o, n) => `<div class="opt-erow" data-key="${esc(o.code)}">
+            <button class="opt-del" data-del="${esc(o.code)}" aria-label="Remove ${esc(o.name)}">−</button>
+            <span class="rank">${n + 1}</span>
+            <span class="opt-thumb big" data-opt-img="${esc(o.code)}"></span>
+            <span class="opt-name">${esc(o.name || o.code)}</span>
+            <span class="handle" aria-label="Drag to change the order">≡</span>
+          </div>`).join('')}
+          <button class="action" id="edOptSearch"><span class="ico">🔍</span>Add an option by search</button>
+          <button class="action" id="edOptScan"><span class="ico">▦</span>Add an option by scanning</button>
+        </div>
+        <div class="footnote">${draft.options.length
+          ? 'Whoever shops buys the first one they find. Drag ≡ to change the order – first = favorite.'
+          : 'Happy with a few products (e.g. protein yogurts)? Add them here, favorite first. Whoever shops buys the first one they find.'}</div>
         <div class="group-title">Photo</div>
         <div class="form">
           ${draft.photoURL ? `<img class="preview" src="${draft.photoURL}" alt="Photo">` : ''}
@@ -2308,6 +2508,28 @@ function openEditor(existing, defaultName = '', defaultCategory = FALLBACK, extr
       });
       const noCode = $('#edNoCode', body);
       if (noCode) noCode.onclick = () => { draft.barcode = ''; s.refresh(); };
+      // Options: add (search or scan), remove, drag to reorder.
+      const addOption = (code, name) => {
+        if (!draft.options.some(o => o.code === code)) draft.options = cleanOptions([...draft.options, { code, name }]);
+        if (!trim(draft.name) && name) draft.name = name;
+        s.refresh();
+      };
+      $('#edOptSearch', body).onclick = () => openProductSearch({ onPick: (code, name) => addOption(code, name) });
+      $('#edOptScan', body).onclick = () => openScanner(async code => {
+        const data = await loadPrices().catch(() => null);
+        const name = data?.items?.[code]?.[0] || findKnownByBarcode(code)?.name || (await lookupBarcode(code))?.name || code;
+        addOption(code, name);
+      });
+      body.querySelectorAll('[data-del]').forEach(b => b.onclick = () => {
+        draft.options = draft.options.filter(o => o.code !== b.dataset.del);
+        s.refresh();
+      });
+      const optBox = $('.opt-edit', body);
+      makeSortable(optBox, keys => {
+        draft.options = keys.map(k => draft.options.find(o => o.code === k)).filter(Boolean);
+        s.refresh();
+      });
+      fillOptionPhotos(body);
       s.setRightEnabled(!!trim(draft.name));
     }
   });
