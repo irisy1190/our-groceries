@@ -170,7 +170,8 @@ function parseItem(id, d) {
     barcode: d.barcode ?? '',
     // "Any of these": products you're happy with, favorite first. boughtOption = the barcode that was bought.
     options: cleanOptions(d.options),
-    boughtOption: d.boughtOption ?? ''
+    boughtOption: d.boughtOption ?? '',
+    weighed: d.weighed?.key ? { key: String(d.weighed.key), kg: typeof d.weighed.kg === 'number' ? d.weighed.kg : null } : null
   };
 }
 
@@ -187,7 +188,8 @@ function itemData(it) {
     photoUrl: it.photoUrl ?? null,
     barcode: it.barcode || '',
     options: cleanOptions(it.options),
-    boughtOption: it.boughtOption || ''
+    boughtOption: it.boughtOption || '',
+    weighed: it.weighed?.key ? { key: it.weighed.key, kg: it.weighed.kg ?? null } : null
   };
 }
 
@@ -1020,6 +1022,7 @@ function openProductSearch({ onPick = null } = {}) {
   let data = pricesData;
   let timer = null;
   let root = null; // the sheet's body
+  let lastWeighed = []; // sold-by-weight results on screen
   const SHOW = 40;
   const searchSheet = openSheet({
     title: onPick ? 'Add an option' : 'Find a product',
@@ -1034,6 +1037,8 @@ function openProductSearch({ onPick = null } = {}) {
         const inp = $('#psInput', body);
         inp.oninput = () => { clearTimeout(timer); timer = setTimeout(() => { query = inp.value; drawResults(); }, 180); };
         $('#psResults', body).onclick = e => {
+          const wrow = e.target.closest('[data-weighed]');
+          if (wrow) { inp.blur(); openWeighedSheet(lastWeighed[+wrow.dataset.weighed], { onAdded: () => searchSheet.close() }); return; }
           const row = e.target.closest('[data-code]');
           if (!row) return;
           inp.blur();
@@ -1054,11 +1059,13 @@ function openProductSearch({ onPick = null } = {}) {
       return;
     }
     const hits = productSearch(data, query);
-    if (!hits.length) {
+    const wg = onPick ? [] : weighedSearch(data, query);
+    lastWeighed = wg;
+    if (!hits.length && !wg.length) {
       box.innerHTML = `<div class="empty" style="padding:30px 10px"><div class="big">🔍</div><h3>Nothing found</h3>Try fewer words, or the Hebrew name.</div>`;
       return;
     }
-    box.innerHTML = `<div class="form prices results">${hits.slice(0, SHOW).map(h => {
+    box.innerHTML = `${weighedResultsHTML(data, wg)}${wg.length && hits.length ? '<div class="group-title">Packaged</div>' : ''}${!hits.length ? '' : `<div class="form prices results">${hits.slice(0, SHOW).map(h => {
       const best = withBestPrices(resultFromData(data, h.code)).filter(s => s.each != null).sort((a, b) => a.each - b.each)[0];
       const sub = best ? `${best.deal ? 'Best deal' : 'Cheapest'}: ${esc(best.label)} ${money(best.each)}${best.deal ? ' each' : ''} · in ${h.stores} of ${data.stores.length} stores` : '';
       return `<button class="price-row result" data-code="${esc(h.code)}">
@@ -1066,7 +1073,7 @@ function openProductSearch({ onPick = null } = {}) {
           <div class="main"><div class="store">${esc(h.name)}${h.maker && !searchNorm(h.name).includes(searchNorm(h.maker)) ? ` <span class="maker">· ${esc(h.maker)}</span>` : ''}</div><div class="sub">${sub}</div></div>
           <span class="chev-r">${onPick ? '＋' : '›'}</span>
         </button>`;
-    }).join('')}</div>
+    }).join('')}</div>`}
     <div class="footnote">${hits.length > SHOW ? `Showing ${SHOW} of ${hits.length} – add a word to narrow it down. ` : ''}Product photos from supermarket websites and Open Food Facts.</div>`;
     // Load photos only for results you can see.
     const io = new IntersectionObserver(entries => entries.forEach(en => {
@@ -1078,6 +1085,191 @@ function openProductSearch({ onPick = null } = {}) {
     box.querySelectorAll('[data-img]').forEach(el => io.observe(el));
   }
   if (!data) loadPrices().then(d => { data = d; drawResults(); });
+}
+
+// ---------- Sold by weight (fruit, vegetables, the counters) ----------
+// Stores give these their own short codes, so the same thing is matched across stores by name.
+// Every price is per kg.
+
+// Words that say where it's from or how it's sold, not what it is.
+const WEIGHT_NOISE = new Set(['ישראל', 'תוצרת', 'יבוא', 'מיובא', 'צרפת', 'ספרד', 'איטליה', 'יוון', 'טורקיה', 'סין', 'הולנד', 'ארצות',
+  'הברית', 'ארה', 'ארהב', 'חול', 'תפזורת', 'במשקל', 'משקל', 'טרי', 'טריה', 'טריים', 'ארוז', 'ארוזה', 'מובחר', 'מובחרת', 'אורגני', 'בתפזורת',
+  'מעדניה', 'מעדנייה', 'קג', 'גרם', 'לקג', 'ל', 'ק', 'ג', 'דוד', 'משה']);
+
+/** One word in a standard form: "בננות" → "בננה", "עגבנייה" → "עגבניה", "מלפפונים" → "מלפפון". */
+const FINAL_LETTER = { 'כ': 'ך', 'מ': 'ם', 'נ': 'ן', 'פ': 'ף', 'צ': 'ץ' };
+function weightStem(w) {
+  w = w.replace(/יי/g, 'י');
+  if (w.length > 4 && w.endsWith('ות')) return w.slice(0, -2) + 'ה';
+  if (w.length > 4 && w.endsWith('ים')) { w = w.slice(0, -2); return w.slice(0, -1) + (FINAL_LETTER[w.at(-1)] || w.at(-1)); }
+  return w;
+}
+const weightWords = name => searchNorm(name).split(' ').filter(w => w && !WEIGHT_NOISE.has(w) && !/^\d/.test(w)).map(weightStem);
+
+let weightIndex = null; // { data, groups: Map(key → { key, words, title, stores: Map(storeIdx → {name, price}) }) }
+function weighedGroups(data) {
+  if (weightIndex?.data === data) return weightIndex.groups;
+  const groups = new Map();
+  for (const row of data?.weighed || []) {
+    const [si, , name, price] = row;
+    if (!(price > 0)) continue;
+    const words = weightWords(name);
+    if (!words.length) continue;
+    const key = words.join(' ');
+    let g = groups.get(key);
+    if (!g) groups.set(key, g = { key, words, title: '', stores: new Map() });
+    const cur = g.stores.get(si);
+    if (!cur || price < cur.price) g.stores.set(si, { name, price });
+    // The group's name: the shortest store name, without country words.
+    const clean = searchNorm(name).split(' ').filter(w => w && !WEIGHT_NOISE.has(w)).join(' ');
+    if (!g.title || clean.length < g.title.length) g.title = clean;
+  }
+  weightIndex = { data, groups };
+  return groups;
+}
+
+/** Sold-by-weight matches for a search, best first. A one-word kind (e.g. "עגבניה") borrows a close match from a store that names it differently, marked "similar". */
+function weighedSearch(data, query) {
+  const groups = weighedGroups(data);
+  const words = searchNorm(query).split(' ').filter(Boolean).map(w => [weightStem(w), ...[].concat(EN_HE[w] || []).map(x => weightStem(searchNorm(x)))]);
+  if (!words.length) return [];
+  const hits = [...groups.values()].filter(g => words.every(alts => alts.some(a => g.key.includes(a))));
+  const exact = words.map(alts => alts[0]).join(' ');
+  const score = g => {
+    let s = g.key === exact || words.every(alts => alts.some(a => g.words.includes(a))) && g.words.length === words.length ? 5 : 0;
+    words.forEach(alts => { const i = g.words.findIndex(w => alts.includes(w)); s += i === 0 ? 4 : i > 0 ? 2 : 0.5; });
+    return s - g.words.length * 0.6 + g.stores.size * 0.8;
+  };
+  hits.sort((a, b) => score(b) - score(a) || a.key.length - b.key.length);
+  return hits.slice(0, 8).map(g => expandGroup(g, hits));
+}
+
+/** A store missing from a one-word kind ("עגבניה") borrows that store's closest variety, marked similar. */
+const BORROW_SKIP = new Set(['שרי', 'מגי', 'תמר', 'בייבי', 'פנינה', 'ציפס', 'צפס', 'מיובש', 'מיובשת', 'קפוא', 'קפואה', 'כבוש', 'מוחמץ', 'מגורד', 'קלוף', 'קלופה', 'חתוך', 'פרוס']);
+function expandGroup(g, hits) {
+  const stores = new Map([...g.stores].map(([si, v]) => [si, { ...v, similar: false }]));
+  if (g.words.length === 1) {
+    for (const other of hits) {
+      if (other === g || other.words[0] !== g.words[0] || other.words.length > 2) continue;
+      if (other.words.some(x => BORROW_SKIP.has(x))) continue; // cherry, baby, dried… are different things
+      for (const [si, v] of other.stores) {
+        const cur = stores.get(si);
+        if (!cur || (cur.similar && v.name.length < cur.name.length)) stores.set(si, { ...v, similar: true });
+      }
+    }
+  }
+  return { key: g.key, title: g.title, words: g.words, stores };
+}
+
+/** A group's prices, cheapest first: [{ label, name, price, similar }]. Sales on these aren't in the files' sale lists, so shelf price only. */
+function weighedRows(data, g) {
+  return [...g.stores].map(([si, v]) => ({ label: data.stores[si]?.label || '', ...v }))
+    .filter(r => r.label).sort((a, b) => a.price - b.price);
+}
+
+// Typical weight of one piece (grams), for "3 onions ≈ 0.5 kg".
+const PIECE_GRAMS = {
+  'בצל': 170, 'בננה': 150, 'תפוח': 180, 'עגבניה': 120, 'מלפפון': 120, 'גזר': 80, 'פלפל': 170, 'לימון': 110, 'תפוז': 220,
+  'אבוקדו': 220, 'קישוא': 200, 'חציל': 350, 'אגס': 180, 'נקטרינה': 150, 'אפרסק': 160, 'קיווי': 90, 'מנגו': 400, 'בטטה': 300,
+  'כרובית': 900, 'כרוב': 1300, 'אשכולית': 380, 'קלמנטינה': 90, 'מנדרינה': 100, 'שזיף': 70, 'רימון': 350, 'מלון': 1600,
+  'אבטיח': 6000, 'סלק': 200, 'קולרבי': 250, 'שומר': 300, 'תפוא': 200, 'דלעת': 1500, 'פומלה': 1000, 'אפרסמון': 220, 'תאנה': 50
+};
+function pieceGrams(g) {
+  const w = g.words || weightWords(g.title || '');
+  if (w[0] === 'תפוח' && w[1] === 'אדמה') return 200;
+  if (/שרי|תמר/.test((g.title || '') + ' ' + w.join(' ')) || w.includes('שרי')) return null; // cherry tomatoes: by weight only
+  return PIECE_GRAMS[w[0]] || null;
+}
+const kgLabel = kg => kg === 0.5 ? '½ kg' : `${+kg.toFixed(2)} kg`;
+
+/** Tap a sold-by-weight result: price per kg at each store (pick one), how much (optional), then add. */
+function openWeighedSheet(g, { onAdded = null } = {}) {
+  const data = pricesData;
+  const rows = weighedRows(data, g);
+  let store = rows[0]?.label || '';
+  let mode = 'kg';       // 'kg' | 'count'
+  let kg = null;         // picked weight, or null
+  let count = 0;         // 0 = nothing picked
+  let otherOpen = false;
+  const per = pieceGrams(g);
+  openSheet({
+    title: g.title,
+    left: { label: 'Back' },
+    render(body, sh) {
+      const best = rows[0]?.price;
+      const rowHTML = rows.map(r => {
+        const isBest = r.price <= best + 0.005 && rows.length > 1;
+        const diff = r.price > best + 0.005 ? `<span class="diff">+${money(r.price - best)} per kg</span>` : '<span class="diff">per kg</span>';
+        return `<button class="price-row pick ${isBest ? 'best' : ''} ${r.label === store ? 'picked' : ''}" data-store="${esc(r.label)}">
+          <span class="radio ${r.label === store ? 'on' : ''}"></span>
+          <div class="main"><div class="store">${esc(r.label)}${isBest ? ` <span class="best-tag">${rows.filter(x => x.price <= best + 0.005).length > 1 ? 'Same price' : 'Cheapest'}</span>` : ''}${r.similar ? ' <span class="similar-tag">similar</span>' : ''}</div>
+            <div class="sub name-text">${esc(r.name)}</div></div>
+          <div class="amount">${money(r.price)}${diff}</div></button>`;
+      }).join('');
+      const kgFor = () => mode === 'kg' ? kg : (count && per ? count * per / 1000 : null);
+      const amountKg = kgFor();
+      const priceOf = l => rows.find(r => r.label === l)?.price;
+      let est = 'Nothing picked: it\'s added without an amount. Pick one to see the total – tap it again to unpick.';
+      if (mode === 'count' && count && !per) est = `${count} – no typical weight for this one, so no total. Price per kg is in the note.`;
+      else if (amountKg) {
+        const lead = mode === 'count' ? `${count} ${count === 1 ? 'piece is' : 'pieces are'} usually about ${kgLabel(Math.round(amountKg * 10) / 10)} → ` : '';
+        est = `${lead}about <b>${money(amountKg * priceOf(store))}</b> at ${esc(store)}` +
+          rows.filter(r => r.label !== store).map(r => ` · ${money(amountKg * r.price)} at ${esc(r.label)}`).join('');
+      }
+      const kgChips = [0.5, 1, 1.5, 2].map(v => `<button class="chip amt ${mode === 'kg' && kg === v ? 'on' : ''}" data-kg="${v}">${kgLabel(v)}</button>`).join('')
+        + (kg && ![0.5, 1, 1.5, 2].includes(kg) ? `<button class="chip amt on" data-kg="${kg}">${kgLabel(kg)}</button>` : '')
+        + `<button class="chip amt" id="wOther">Other…</button>`;
+      body.innerHTML = `
+        <div class="hint">Sold by weight · today's price per kg</div>
+        <div class="form prices picks">${rowHTML || '<div class="empty">No prices today.</div>'}</div>
+        <div class="group-title">How much? <span style="text-transform:none">(optional)</span></div>
+        <div class="tabs"><button data-mode="kg" class="${mode === 'kg' ? 'on' : ''}">By weight</button><button data-mode="count" class="${mode === 'count' ? 'on' : ''}">By count</button></div>
+        ${mode === 'kg'
+          ? `<div class="cat-pick">${kgChips}</div>${otherOpen ? `<div class="form"><input id="wKg" type="number" inputmode="decimal" step="0.1" min="0.1" placeholder="kg, e.g. 0.8"></div>` : ''}`
+          : `<div class="stepper"><button id="wMinus" aria-label="One less">−</button><b>${count || '–'}</b><button id="wPlus" aria-label="One more">+</button></div>`}
+        <div class="footnote est">${est}</div>
+        <div class="form" style="margin-top:14px"><button class="action" id="wAdd"><span class="ico">➕</span>Add to the list</button></div>`;
+      body.querySelectorAll('[data-store]').forEach(b => b.onclick = () => { store = b.dataset.store; sh.refresh(); });
+      body.querySelectorAll('[data-mode]').forEach(b => b.onclick = () => { mode = b.dataset.mode; sh.refresh(); });
+      body.querySelectorAll('[data-kg]').forEach(b => b.onclick = () => { const v = +b.dataset.kg; kg = kg === v ? null : v; otherOpen = false; sh.refresh(); });
+      const other = $('#wOther', body);
+      if (other) other.onclick = () => { otherOpen = true; sh.refresh(); setTimeout(() => $('#wKg', body)?.focus(), 30); };
+      const kin = $('#wKg', body);
+      if (kin) kin.onchange = () => { const v = parseFloat(kin.value); kg = v > 0 ? Math.round(v * 100) / 100 : null; otherOpen = false; sh.refresh(); };
+      const minus = $('#wMinus', body), plus = $('#wPlus', body);
+      if (minus) minus.onclick = () => { count = Math.max(0, count - 1); sh.refresh(); };
+      if (plus) plus.onclick = () => { count = Math.min(99, count + 1); sh.refresh(); };
+      $('#wAdd', body).onclick = () => {
+        const p = priceOf(store);
+        const a = kgFor();
+        const quantity = mode === 'kg' ? (kg ? kgLabel(kg) : '') : (count ? String(count) : '');
+        let note = store && p ? `${store} · ${money(p)}/kg` : '';
+        if (note && a) note += mode === 'count' ? ` (${count} ≈ ${kgLabel(Math.round(a * 10) / 10)} ≈ ${money(a * p)})` : ` (≈ ${money(a * p)})`;
+        const name = g.title;
+        const cat = knownCategory(name) || (categories().includes('Market') ? 'Market' : state.newCategory);
+        if (isOnList(name)) { showNotice(`${name} is already on the list.`); setTimeout(hideNotice, 1800); return; }
+        const item = addItem(name, cat, quantity, note);
+        if (item) updateDoc(itemRef(item.id), { weighed: { key: g.key, kg: a || null } }).catch(() => {});
+        sh.close();
+        onAdded?.();
+      };
+    }
+  });
+}
+
+/** Search result rows for the sold-by-weight group. */
+function weighedResultsHTML(data, groups) {
+  if (!groups.length) return '';
+  return `<div class="group-title">Sold by weight <span class="kg-tag">per kg</span></div>
+    <div class="form prices results">${groups.map((g, n) => {
+      const rows = weighedRows(data, g);
+      const best = rows[0]?.price;
+      return `<button class="price-row result wres" data-weighed="${n}">
+        <span class="prod-img">⚖️</span>
+        <div class="main"><div class="store">${esc(g.title)}</div>
+          <div class="wchips">${rows.map(r => `<span class="pchip ${r.price <= best + 0.005 && rows.length > 1 ? 'best' : ''}">${esc(r.label)} ${money(r.price)}${r.similar ? ' <i>similar</i>' : ''}</span>`).join('')}</div></div>
+        <span class="chev-r">›</span></button>`;
+    }).join('')}</div>`;
 }
 
 // ---------- "Any of these": an item with a few acceptable products, favorite first ----------
@@ -1894,6 +2086,17 @@ function plannedStore(item) {
 
 /** Price per item at one store (best deal there counts), and the cheapest across your stores. */
 function priceAt(item, label) {
+  if (item.weighed) {
+    // Sold by weight: the total for the amount you picked, or the price per kg when there's no amount.
+    const g = weighedGroups(pricesData).get(item.weighed.key);
+    if (!g) return { here: null, anywhere: null };
+    const rows = weighedRows(pricesData, expandGroup(g, [...weighedGroups(pricesData).values()].filter(o => o.words[0] === g.words[0])));
+    const mult = item.weighed.kg || 1;
+    const at = rows.find(r => r.label === label);
+    const here = at ? { each: at.price * mult, deal: null, price: at.price * mult, perKg: !item.weighed.kg } : null;
+    const anywhere = rows[0] ? { each: rows[0].price * mult, store: rows[0].label } : null;
+    return { here, anywhere };
+  }
   const codes = item.options?.length ? item.options.map(o => o.code) : item.barcode ? [item.barcode] : [];
   let here = null, anywhere = null;
   for (const code of codes) {
@@ -1947,7 +2150,7 @@ function renderFilteredList() {
     let small = '';
     if (here.deal) small = `<small class="down">on sale</small>`;
     if (ref && ref.each < here.each - 0.005) small = `<small class="up">+${money(here.each - ref.each)}${here.each !== here.price ? '' : ''}</small>`;
-    return `<div class="f-price">${money(here.each)}${small}</div>`;
+    return `<div class="f-price">${money(here.each)}${here.perKg ? '<small>per kg</small>' : ''}${small}</div>`;
   };
   const card = list => `<div class="card f-card">${list.map(x => rowHTML(x.i, x.price)).join('')}</div>`;
   let html = '';
@@ -1972,8 +2175,8 @@ function renderFilteredList() {
   }
   // Estimated total for what you planned here (prices × quantity when it's a number).
   if (f !== NOT_PLANNED) {
-    const open = planned.filter(x => !x.i.isChecked && x.here);
-    const total = open.reduce((sum, x) => sum + x.here.each * qtyCount(x.i.quantity), 0);
+    const open = planned.filter(x => !x.i.isChecked && x.here && !x.here.perKg);
+    const total = open.reduce((sum, x) => sum + x.here.each * (x.i.weighed ? 1 : qtyCount(x.i.quantity)), 0);
     if (open.length) html += `<div class="f-total"><span>At ${esc(f)}: ${open.length} planned</span><b>≈ ${money(total)}</b></div>`;
   }
   document.body.classList.add('filtering');

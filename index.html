@@ -526,6 +526,19 @@
   body.filtering main { padding-bottom: 90px; }
   body.filtering .row .handle { display: none; }
   .f-empty { padding: 24px 10px; text-align: center; color: var(--muted); }
+
+  /* ---------- Sold by weight ---------- */
+  .kg-tag { font-size: 11px; font-weight: 700; text-transform: none; letter-spacing: 0; padding: 1px 6px; border-radius: 6px;
+    background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); margin-left: 4px; }
+  .wchips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+  .pchip i { font-style: normal; font-size: 11px; color: #C2410C; }
+  .similar-tag { font-size: 11px; font-weight: 700; color: #C2410C; }
+  .chip.amt { background: var(--card); color: var(--text); font-size: 15px; padding: 7px 13px; }
+  .chip.amt.on { background: var(--accent); color: #fff; }
+  .stepper { display: flex; align-items: center; justify-content: center; gap: 26px; padding: 6px 0 2px; }
+  .stepper button { width: 44px; height: 44px; border-radius: 22px; background: var(--card); color: var(--accent); font-size: 26px; font-weight: 600; box-shadow: var(--shadow); }
+  .stepper b { font-size: 28px; min-width: 50px; text-align: center; font-variant-numeric: tabular-nums; }
+  .footnote.est { font-size: 14px; color: var(--text); margin-top: 10px; }
   .barcode-num { font-variant-numeric: tabular-nums; letter-spacing: 1px; font-weight: 600; }
 
   .invite .code {
@@ -576,7 +589,7 @@
 
   <main id="list"><div class="loading">Loading…</div></main>
 
-  <script type="module" src="app.js?v=43"></script>
+  <script type="module" src="app.js?v=44"></script>
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
