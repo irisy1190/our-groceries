@@ -538,6 +538,7 @@
   .stepper { display: flex; align-items: center; justify-content: center; gap: 26px; padding: 6px 0 2px; }
   .stepper button { width: 44px; height: 44px; border-radius: 22px; background: var(--card); color: var(--accent); font-size: 26px; font-weight: 600; box-shadow: var(--shadow); }
   .stepper b { font-size: 28px; min-width: 50px; text-align: center; font-variant-numeric: tabular-nums; }
+  .plan-tag { font-size: 11px; font-weight: 700; color: var(--muted); border: 1px solid var(--line); padding: 1px 6px; border-radius: 7px; margin-left: 4px; vertical-align: 2px; }
   .footnote.est { font-size: 14px; color: var(--text); margin-top: 10px; }
   .barcode-num { font-variant-numeric: tabular-nums; letter-spacing: 1px; font-weight: 600; }
 
@@ -589,7 +590,7 @@
 
   <main id="list"><div class="loading">Loading…</div></main>
 
-  <script type="module" src="app.js?v=44"></script>
+  <script type="module" src="app.js?v=46"></script>
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));

@@ -2680,6 +2680,7 @@ function openItemActions(item) {
     render(body, sheet) {
       body.innerHTML = `<div class="form">
         <button class="action" data-a="edit"><span class="ico">✏️</span>Edit</button>
+        ${pricesUrl() ? `<button class="action" data-a="prices"><span class="ico">₪</span>Show all prices</button>` : ''}
         <button class="action" data-a="fav"><span class="ico">${fav ? '☆' : '⭐'}</span>${fav ? 'Remove from favorites' : 'Add to favorites'}</button>
         <button class="action danger" data-a="delete"><span class="ico">🗑️</span>Delete</button>
       </div>`;
@@ -2689,10 +2690,77 @@ function openItemActions(item) {
         sheet.close();
         if (a === 'fav') toggleFavorite(item);
         if (a === 'edit') openEditor(item);
+        if (a === 'prices') openItemPrices(item);
         if (a === 'delete') deleteItem(item);
       };
     }
   });
+}
+
+
+/** ⋯ → Show all prices: every store's price for an item on the list, to see if another store is worth the trip. */
+function openItemPrices(item) {
+  const sheet = openSheet({
+    title: item.name,
+    left: { label: 'Close' },
+    render(body) {
+      const it = state.items.find(i => i.id === item.id) || item;
+      if (!pricesData) { body.innerHTML = `<div class="loading" style="padding:30px">Loading prices…</div>`; return; }
+      const planned = plannedStore(it);
+      const n = it.weighed ? 1 : qtyCount(it.quantity);
+      let html = '';
+      // One line per store: the best way to buy it there, and how much more than the cheapest.
+      const storeRows = list => {
+        const best = list[0]?.each;
+        return `<div class="form prices">${list.map(r => {
+          const isBest = r.each <= best + 0.005 && list.length > 1;
+          const diff = r.each > best + 0.005 ? `<span class="diff">+${money(r.each - best)}${r.unit}</span>` : `<span class="diff">${r.unit.replace(/^ /, '')}</span>`;
+          return `<div class="price-row ${isBest ? 'best' : ''}">
+            <div class="main"><div class="store">${esc(r.label)}${isBest ? ` <span class="best-tag">${list.filter(x => x.each <= best + 0.005).length > 1 ? 'Same price' : 'Cheapest'}</span>` : ''}${r.label === planned ? ' <span class="plan-tag">planned</span>' : ''}</div>
+              ${r.sub ? `<div class="sub name-text">${r.sub}</div>` : ''}${r.extra ? `<div class="sub">${r.extra}</div>` : ''}${r.deal ? `<div class="sale">🏷️ ${r.deal}</div>` : ''}</div>
+            <div class="amount">${money(r.each)}${diff}</div></div>`;
+        }).join('')}</div>`;
+      };
+      const totals = list => n > 1 && list.length > 1
+        ? `<div class="footnote est">For ${n}: ${list.map(r => `${esc(r.label)} ${money(r.each * n)}`).join(' · ')}${(list.at(-1).each - list[0].each) * n >= 0.005 ? ` – up to ${money((list.at(-1).each - list[0].each) * n)} more` : ' – the same'}.</div>` : '';
+      if (it.weighed) {
+        const g = weighedGroups(pricesData).get(it.weighed.key);
+        const rows = g ? weighedRows(pricesData, expandGroup(g, [...weighedGroups(pricesData).values()].filter(o => o.words[0] === g.words[0]))) : [];
+        const kg = it.weighed.kg;
+        const list = rows.map(r => ({ label: r.label, each: kg ? r.price * kg : r.price, unit: kg ? '' : ' per kg', sub: `<bdi>${esc(r.name)}</bdi>${r.similar ? ' · similar' : ''}`, extra: kg ? `${money(r.price)} per kg` : '' }));
+        html = list.length ? `<div class="hint">Sold by weight${kg ? ` · for about ${kgLabel(Math.round(kg * 10) / 10)}` : ' · price per kg'}</div>${storeRows(list)}` : '';
+      } else if (it.options?.length) {
+        // Per store: the cheapest of your options there.
+        const byStore = new Map();
+        for (const o of it.options) {
+          const r = resultFromData(pricesData, o.code);
+          if (!r) continue;
+          for (const s of withBestPrices(r)) {
+            if (s.each == null) continue;
+            const cur = byStore.get(s.label);
+            if (!cur || s.each < cur.each) byStore.set(s.label, { label: s.label, each: s.each, unit: s.deal ? ' each' : '', sub: esc(o.name), deal: s.deal ? esc(promoLabel(s.deal)) : '' });
+          }
+        }
+        const list = [...byStore.values()].sort((a, b) => a.each - b.each);
+        html = list.length ? `<div class="hint">The cheapest of your ${it.options.length} options at each store</div>${storeRows(list)}${totals(list)}` : '';
+      } else if (it.barcode) {
+        const r = resultFromData(pricesData, it.barcode);
+        if (r) {
+          const list = withBestPrices(r).filter(s => s.each != null).sort((a, b) => a.each - b.each)
+            .map(s => ({ label: s.label, each: s.each, unit: s.deal ? ' each on sale' : '', sub: s.deal ? `Shelf price ${money(s.price)}` : '', deal: s.deal ? esc(promoLabel(s.deal)) : '' }));
+          const notSold = r.stores.filter(s => s.price == null).map(s => s.label);
+          html = `${storeRows(list)}${totals(list)}${notSold.length ? `<div class="footnote">Not sold at ${esc(notSold.join(', '))}.</div>` : ''}`;
+        }
+      }
+      body.innerHTML = html
+        ? `${html}<div class="footnote">Today's shelf prices and sales from your stores' price files.</div>`
+        : `<div class="empty" style="padding:26px 10px"><div class="big">🔍</div><h3>No prices for this item</h3>${it.barcode || it.options?.length || it.weighed
+            ? 'It isn\'t in your stores\' price files today.'
+            : 'It has no barcode yet. Scan it in ⋯ → Edit, or add it from 🔍 search, and its prices will show here.'}</div>`;
+    }
+  });
+  sheet.live = true;
+  if (!pricesData) loadPrices().then(() => sheet.refresh());
 }
 
 function openMoveTo(item) {
