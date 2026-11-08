@@ -367,6 +367,7 @@ function start(id) {
         count: Number(k.count ?? 0),
         isFavorite: !!k.isFavorite,
         barcode: k.barcode || '',
+        options: cleanOptions(k.options), // "any of these" products come back when you add it again
         lastUsed: k.lastUsed?.toMillis?.() ?? 0
       };
     }
@@ -649,10 +650,10 @@ function pricesUrl() {
 }
 
 /** Loads today's prices (and keeps a copy, so it also works without internet). */
-async function loadPrices() {
+async function loadPrices({ maxAge = 3 * 3600 * 1000 } = {}) {
   const url = pricesUrl();
   if (!url) return null;
-  const fresh = pricesData && pricesFrom === url && Date.now() - pricesLoadedAt < 3 * 3600 * 1000;
+  const fresh = pricesData && pricesFrom === url && Date.now() - pricesLoadedAt < maxAge;
   if (fresh) return pricesData;
   if (pricesPromise && pricesFrom === url) return pricesPromise;
   pricesFrom = url;
@@ -924,12 +925,33 @@ const EN_HE = {
   pita: 'פיתה', challah: 'חלה', schnitzel: 'שניצל', sausages: 'נקניקיות', ham: 'נקניק', frozen: 'קפוא', vitamin: 'ויטמין', sunscreen: 'קרם הגנה'
 };
 
+// Words stores write differently for the same thing: typing any one finds the others.
+const SAME_WORDS = [
+  ['חלבון', 'פרו', 'pro', 'protein', 'פרוטאין', 'פרוטאיין'],
+  ['יוגורט', 'יוגורטים', 'yogurt', 'yoghurt', 'יוגורטי'],
+  ['זירו', 'zero', 'דיאט', 'diet', 'ללס', 'לייט', 'light'],
+  ['לקטוז', 'lactose', 'ללל'],
+  ['אורגני', 'אורגנית', 'אורגניים', 'organic', 'ביו', 'bio'],
+  ['גלוטן', 'gluten', 'ללג'],
+  ['טבעוני', 'טבעונית', 'vegan', 'צמחי', 'צמחית'],
+  ['קוטג', 'cottage', 'קוטג׳'],
+  ['שמנת', 'cream', 'שמנת מתוקה'],
+  ['חיתולים', 'חיתול', 'diapers', 'diaper', 'טיטולים', 'טיטול'],
+  ['מגבונים', 'מגבון', 'wipes']
+];
+/** A typed word and everything that means the same (its translation, other spellings). */
+function wordAlts(w) {
+  const alts = new Set([w, ...[].concat(EN_HE[w] || []).map(x => searchNorm(x))]);
+  for (const g of SAME_WORDS) if ([...alts].some(a => g.includes(a))) g.forEach(x => alts.add(searchNorm(x)));
+  return [...alts].filter(Boolean);
+}
 const searchNorm = t => String(t || '').toLowerCase().replace(/["'`״׳]/g, '').replace(/(\d)\s+%/g, '$1%').replace(/[^\p{L}\p{N}%.]+/gu, ' ').trim();
 
 let searchIndex = null; // [{ code, norm, tokens }] built once per price file
 
 // Words that make a product a "kind of" something else (chocolate milk, milk drink, milk pudding).
 // When you didn't type them, such products sink below the plain product.
+const TASTES = ['שוקו', 'שוקולד', 'בטעם', 'וניל', 'תות', 'בננה', 'קפה', 'קקאו', 'מוקה', 'קרמל', 'פירות', 'אפרסק', 'מנגו', 'לימון'];
 const FLAVOR_WORDS = ['שוקו', 'שוקולד', 'בטעם', 'משקה', 'אבקת', 'מעדן', 'פודינג', 'וניל', 'תות', 'בננה', 'קפה', 'קקאו',
   'ממרח', 'חטיף', 'עוגיות', 'עוגה', 'דייסה', 'דייסת', 'גלידה', 'קרם', 'רוטב', 'סוכריות', 'מילקי', 'דנונה', 'יוגורט', 'מוס', 'קצפת', 'פרי',
   'פירות', 'מתוק', 'מתוקה', 'מתובל', 'תוספת', 'שייק', 'פרוטאין', 'חלבון'];
@@ -952,8 +974,12 @@ function searchScore(tokens, norm, words, typed) {
   }
   const has = f => tokens.some(t => t === f || t.replace(/^[והבלמכש]/, '') === f || t.startsWith(f + '-'));
   // Looking for a flavored product yourself ("שוקו", "וניל")? Then flavored names aren't pushed down.
-  if (!FLAVOR_WORDS.some(f => typed.split(' ').includes(f))) {
-    for (const f of FLAVOR_WORDS) if (has(f)) score -= 3;
+  // Typed a flavor yourself ("שוקו", "וניל")? Then flavored names aren't pushed down.
+  // Otherwise each flavor word you didn't ask for (e.g. chocolate when you searched protein yogurt) sinks the product.
+  const typedWords = typed.split(' ');
+  const literal = words.map(alts => alts[0]);
+  if (!TASTES.some(f => literal.includes(f))) {
+    for (const f of FLAVOR_WORDS) if (has(f) && !typedWords.includes(f)) score -= 3;
   }
   return score;
 }
@@ -969,10 +995,11 @@ function productSearch(data, query) {
     }) };
   }
   // Each word must appear in the name (an English word may match its Hebrew translation instead).
-  const words = searchNorm(query).split(' ').filter(Boolean).map(w => [w, ...[].concat(EN_HE[w] || []).map(searchNorm)]);
+  const words = searchNorm(query).split(' ').filter(Boolean).map(wordAlts);
   if (!words.length) return [];
   const typed = words.flat().join(' ');
-  const hits = searchIndex.rows.filter(r => words.every(alts => alts.some(a => r.norm.includes(a))));
+  const has = (r, a) => a.length <= 3 && !/\d/.test(a) ? r.tokens.some(t => t === a || (t.startsWith(a) && !/^פרוז|^פרות|^פרוס|^פרוב/.test(t)) || t.replace(/^[והבלמכש]/, '') === a) : r.norm.includes(a);
+  const hits = searchIndex.rows.filter(r => words.every(alts => alts.some(a => has(r, a))));
   const stores = code => (data.items[code][1] || []).filter(v => v != null).length;
   return hits
     .map(r => ({ code: r.code, name: data.items[r.code][0], maker: r.maker, stores: stores(r.code), score: searchScore(r.tokens, r.norm, words, typed) }))
@@ -2700,6 +2727,7 @@ function openItemActions(item) {
 
 /** ⋯ → Show all prices: every store's price for an item on the list, to see if another store is worth the trip. */
 function openItemPrices(item) {
+  const linesByStore = new Map(); // store → the note line for buying it there
   const sheet = openSheet({
     title: item.name,
     left: { label: 'Close' },
@@ -2711,14 +2739,17 @@ function openItemPrices(item) {
       let html = '';
       // One line per store: the best way to buy it there, and how much more than the cheapest.
       const storeRows = list => {
+        list.forEach(r => linesByStore.set(r.label, r.line));
         const best = list[0]?.each;
         return `<div class="form prices">${list.map(r => {
           const isBest = r.each <= best + 0.005 && list.length > 1;
           const diff = r.each > best + 0.005 ? `<span class="diff">+${money(r.each - best)}${r.unit}</span>` : `<span class="diff">${r.unit.replace(/^ /, '')}</span>`;
-          return `<div class="price-row ${isBest ? 'best' : ''}">
+          const on = r.label === planned;
+          return `<button class="price-row pick ${isBest ? 'best' : ''} ${on ? 'picked' : ''}" data-store="${esc(r.label)}">
+            <span class="radio ${on ? 'on' : ''}"></span>
             <div class="main"><div class="store">${esc(r.label)}${isBest ? ` <span class="best-tag">${list.filter(x => x.each <= best + 0.005).length > 1 ? 'Same price' : 'Cheapest'}</span>` : ''}${r.label === planned ? ' <span class="plan-tag">planned</span>' : ''}</div>
               ${r.sub ? `<div class="sub name-text">${r.sub}</div>` : ''}${r.extra ? `<div class="sub">${r.extra}</div>` : ''}${r.deal ? `<div class="sale">🏷️ ${r.deal}</div>` : ''}</div>
-            <div class="amount">${money(r.each)}${diff}</div></div>`;
+            <div class="amount">${money(r.each)}${diff}</div></button>`;
         }).join('')}</div>`;
       };
       const totals = list => n > 1 && list.length > 1
@@ -2727,7 +2758,8 @@ function openItemPrices(item) {
         const g = weighedGroups(pricesData).get(it.weighed.key);
         const rows = g ? weighedRows(pricesData, expandGroup(g, [...weighedGroups(pricesData).values()].filter(o => o.words[0] === g.words[0]))) : [];
         const kg = it.weighed.kg;
-        const list = rows.map(r => ({ label: r.label, each: kg ? r.price * kg : r.price, unit: kg ? '' : ' per kg', sub: `<bdi>${esc(r.name)}</bdi>${r.similar ? ' · similar' : ''}`, extra: kg ? `${money(r.price)} per kg` : '' }));
+        const list = rows.map(r => ({ label: r.label, each: kg ? r.price * kg : r.price, unit: kg ? '' : ' per kg', sub: `<bdi>${esc(r.name)}</bdi>${r.similar ? ' · similar' : ''}`, extra: kg ? `${money(r.price)} per kg` : '',
+          line: `${r.label} · ${money(r.price)}/kg${kg ? ` (≈ ${money(r.price * kg)})` : ''}` }));
         html = list.length ? `<div class="hint">Sold by weight${kg ? ` · for about ${kgLabel(Math.round(kg * 10) / 10)}` : ' · price per kg'}</div>${storeRows(list)}` : '';
       } else if (it.options?.length) {
         // Per store: the cheapest of your options there.
@@ -2738,7 +2770,8 @@ function openItemPrices(item) {
           for (const s of withBestPrices(r)) {
             if (s.each == null) continue;
             const cur = byStore.get(s.label);
-            if (!cur || s.each < cur.each) byStore.set(s.label, { label: s.label, each: s.each, unit: s.deal ? ' each' : '', sub: esc(o.name), deal: s.deal ? esc(promoLabel(s.deal)) : '' });
+            if (!cur || s.each < cur.each) byStore.set(s.label, { label: s.label, each: s.each, unit: s.deal ? ' each' : '', sub: esc(o.name), deal: s.deal ? esc(promoLabel(s.deal)) : '',
+              line: s.deal ? `${s.label} · ${s.deal.text} (${money(s.each)} each)` : `${s.label} · ${money(s.price)}` });
           }
         }
         const list = [...byStore.values()].sort((a, b) => a.each - b.each);
@@ -2747,20 +2780,50 @@ function openItemPrices(item) {
         const r = resultFromData(pricesData, it.barcode);
         if (r) {
           const list = withBestPrices(r).filter(s => s.each != null).sort((a, b) => a.each - b.each)
-            .map(s => ({ label: s.label, each: s.each, unit: s.deal ? ' each on sale' : '', sub: s.deal ? `Shelf price ${money(s.price)}` : '', deal: s.deal ? esc(promoLabel(s.deal)) : '' }));
+            .map(s => {
+              const o = buyOptions(r).find(x => x.store === s.label && x.ok);
+              return { label: s.label, each: s.each, unit: s.deal ? ' each on sale' : '', sub: s.deal ? `Shelf price ${money(s.price)}` : '', deal: s.deal ? esc(promoLabel(s.deal)) : '',
+                line: o ? optionNote(o) : `${s.label} · ${money(s.price)}` };
+            });
           const notSold = r.stores.filter(s => s.price == null).map(s => s.label);
           html = `${storeRows(list)}${totals(list)}${notSold.length ? `<div class="footnote">Not sold at ${esc(notSold.join(', '))}.</div>` : ''}`;
         }
       }
       body.innerHTML = html
-        ? `${html}<div class="footnote">Today's shelf prices and sales from your stores' price files.</div>`
+        ? `<div class="hint">Tap a store to buy it there – the note on the item changes.</div>${html}<div class="footnote">${esc(pricesAge())}</div>`
         : `<div class="empty" style="padding:26px 10px"><div class="big">🔍</div><h3>No prices for this item</h3>${it.barcode || it.options?.length || it.weighed
             ? 'It isn\'t in your stores\' price files today.'
             : 'It has no barcode yet. Scan it in ⋯ → Edit, or add it from 🔍 search, and its prices will show here.'}</div>`;
+      body.querySelectorAll('[data-store]').forEach(b => b.onclick = () => {
+        const line = linesByStore.get(b.dataset.store);
+        if (!line || b.dataset.store === planned) return;
+        updateItem({ ...it, note: withPlannedLine(it.note, line) });
+        register({ type: 'noted', item: it });
+        if (navigator.vibrate) navigator.vibrate(8);
+      });
     }
   });
   sheet.live = true;
-  if (!pricesData) loadPrices().then(() => sheet.refresh());
+  // Always use the newest price file: re-check it if what's on the phone is more than 20 minutes old.
+  loadPrices({ maxAge: 20 * 60 * 1000 }).then(() => sheet.refresh());
+}
+
+/** Replaces the item's "Store · price" line (or adds one at the top), keeping the rest of the note. */
+function withPlannedLine(note, line) {
+  const labels = storeLabels();
+  const lines = (note || '').split('\n');
+  const i = lines.findIndex(l => labels.some(x => l.startsWith(x + ' · ')));
+  if (i >= 0) lines[i] = line; else lines.unshift(line);
+  return lines.filter((l, n) => l || n === 0).join('\n').trim();
+}
+
+/** "Prices from today, 10:18" – when the price file was made. */
+function pricesAge() {
+  const t = pricesData?.updated ? new Date(pricesData.updated) : null;
+  if (!t || isNaN(t)) return "Today's shelf prices and sales from your stores' price files.";
+  const today = new Date().toDateString() === t.toDateString();
+  const time = t.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+  return `Prices from ${today ? 'today' : t.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}, ${time} – the newest your stores published.`;
 }
 
 function openMoveTo(item) {
