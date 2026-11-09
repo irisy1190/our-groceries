@@ -988,21 +988,29 @@ function productSearch(data, query) {
   if (!searchIndex || searchIndex.data !== data) {
     // The brand ("הר ברכה") is searched too: stores often leave it out of the product name.
     const makers = data.makers || [];
+    // Search words an LLM wrote for each barcode (type, category, protein, flavor, English) – see enrich.py.
+    const tagsOf = data.tags || {};
     searchIndex = { data, rows: Object.entries(data.items || {}).map(([code, row]) => {
       const maker = typeof row[2] === 'number' ? makers[row[2]] || '' : '';
       const norm = searchNorm(row[0] + (maker ? ' ' + maker : ''));
-      return { code, norm, tokens: norm.split(' '), maker };
+      const tagNorm = searchNorm(tagsOf[code] || '');
+      return { code, norm, tokens: norm.split(' '), maker, tagNorm, tagTokens: tagNorm ? tagNorm.split(' ') : [] };
     }) };
   }
   // Each word must appear in the name (an English word may match its Hebrew translation instead).
   const words = searchNorm(query).split(' ').filter(Boolean).map(wordAlts);
   if (!words.length) return [];
   const typed = words.flat().join(' ');
-  const has = (r, a) => a.length <= 3 && !/\d/.test(a) ? r.tokens.some(t => t === a || (t.startsWith(a) && !/^פרוז|^פרות|^פרוס|^פרוב/.test(t)) || t.replace(/^[והבלמכש]/, '') === a) : r.norm.includes(a);
-  const hits = searchIndex.rows.filter(r => words.every(alts => alts.some(a => has(r, a))));
+  const hasIn = (tokens, norm, a) => a.length <= 3 && !/\d/.test(a) ? tokens.some(t => t === a || (t.startsWith(a) && !/^פרוז|^פרות|^פרוס|^פרוב/.test(t)) || t.replace(/^[והבלמכש]/, '') === a) : norm.includes(a);
+  const inName = (r, alts) => alts.some(a => hasIn(r.tokens, r.norm, a));
+  const inTags = (r, alts) => alts.some(a => r.tagTokens.includes(a));
+  // Each word must be in the name or in the product's search tags.
+  const hits = searchIndex.rows.filter(r => words.every(alts => inName(r, alts) || inTags(r, alts)));
   const stores = code => (data.items[code][1] || []).filter(v => v != null).length;
+  // A word found only in the tags counts a little, so names that say it outright still come first.
+  const tagBonus = r => words.reduce((n, alts) => n + (!inName(r, alts) && inTags(r, alts) ? 1 : 0), 0);
   return hits
-    .map(r => ({ code: r.code, name: data.items[r.code][0], maker: r.maker, stores: stores(r.code), score: searchScore(r.tokens, r.norm, words, typed) }))
+    .map(r => ({ code: r.code, name: data.items[r.code][0], maker: r.maker, stores: stores(r.code), score: searchScore(r.tokens, r.norm, words, typed) + tagBonus(r) }))
     // Best match first; among equally good matches, the one sold in more of your stores, then the shorter name.
     .sort((a, b) => (b.score - a.score) || (b.stores - a.stores) || (a.name.length - b.name.length));
 }
