@@ -1003,7 +1003,10 @@ function productSearch(data, query) {
   const typed = words.flat().join(' ');
   const hasIn = (tokens, norm, a) => a.length <= 3 && !/\d/.test(a) ? tokens.some(t => t === a || (t.startsWith(a) && !/^פרוז|^פרות|^פרוס|^פרוב/.test(t)) || t.replace(/^[והבלמכש]/, '') === a) : norm.includes(a);
   const inName = (r, alts) => alts.some(a => hasIn(r.tokens, r.norm, a));
-  const inTags = (r, alts) => alts.some(a => r.tagTokens.includes(a));
+  // "טבעי" (plain) also matches a product with no flavor in its name or tags – the tags don't always say it.
+  const FLAVORS = /שוקו|שוקולד|בטעם|וניל|תות|בננה|קפה|קקאו|מוקה|קרמל|פירות|אפרסק|מנגו|לימון|דובדבן|פיסטוק|עוגיות|פקאן|בוטנים|אננס|פטל|ענבים|תפוח|קוקוס|דבש|ריבה|שכבה|קציפת|טופ|פרלין|מייפל|פסיפלורה|אוכמניות|יער|טרופי|קינמון|ג׳ינג׳ר|גינגר|(^| )עם( |$)/;
+  const plain = r => !FLAVORS.test(r.norm) && !FLAVORS.test(r.tagNorm);
+  const inTags = (r, alts) => alts.some(a => r.tagTokens.includes(a)) || (alts.includes('טבעי') && plain(r));
   // Each word must be in the name or in the product's search tags.
   const hits = searchIndex.rows.filter(r => words.every(alts => inName(r, alts) || inTags(r, alts)));
   const stores = code => (data.items[code][1] || []).filter(v => v != null).length;
